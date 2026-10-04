@@ -1,0 +1,30 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Play Badge Silhouette with Rounded Corners -->
+    <path
+        android:pathData="M38,32 C34.7,32 32,34.7 32,38 L32,70 C32,73.3 34.7,76 38,76 L70,76 C73.3,76 76,73.3 76,70 L76,38 C76,34.7 73.3,32 70,32 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="32"
+                android:startY="32"
+                android:endX="76"
+                android:endY="76"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF0044" />
+                <item android:offset="1.0" android:color="#B30026" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Crisp White Play Triangle & Nexora Flare -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M49,43 L65,54 L49,65 Z" />
+    <!-- Dynamic Corner Flare -->
+    <path
+        android:pathData="M32,38 C32,34.7 34.7,32 38,32 L54,32 L32,54 Z"
+        android:fillColor="#33FFFFFF" />
+</vector>

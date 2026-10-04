@@ -1,0 +1,6 @@
+{
+  "name": "Nexora Stream",
+  "description": "Production-grade video-sharing and streaming platform developed by Zentora CLC",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

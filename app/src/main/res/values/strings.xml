@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Nexora Stream</string>
+    <string name="developer_name">Zentora</string>
+    <string name="org_name">Zentora CLC</string>
+    <string name="app_version">1.0.0</string>
+    <string name="mit_license">MIT Open-Source License</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_shorts">Shorts</string>
+    <string name="nav_community">Community</string>
+    <string name="nav_subscriptions">Subscriptions</string>
+    <string name="nav_library">Library</string>
+    <string name="nav_studio">Studio</string>
+    <string name="search_placeholder">Search Nexora Stream…</string>
+    <string name="channel_subscribed">Subscribed</string>
+    <string name="channel_subscribe">Subscribe</string>
+</resources>
