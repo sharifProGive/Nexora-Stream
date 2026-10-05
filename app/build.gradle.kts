@@ -1,3 +1,4 @@
+/* © 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora. */
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -26,7 +27,6 @@ android {
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
     debug {
-      // অ্যান্ড্রয়েডের ডিফল্ট সাইনিং ব্যবহার করবে, কোনো কাস্টম কি-স্টোর লাগবে না
       isMinifyEnabled = false
     }
   }
@@ -35,18 +35,24 @@ android {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
   }
+
   buildFeatures {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+    }
+  }
+
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
@@ -76,6 +82,13 @@ dependencies {
   implementation(libs.androidx.media3.common)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+
+  // নেটওয়ার্ক লাইব্রেরি (Retrofit, OkHttp, Gson)
+  implementation("com.squareup.retrofit2:retrofit:2.11.0")
+  implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+  implementation("com.squareup.okhttp3:okhttp:4.12.0")
+  implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
