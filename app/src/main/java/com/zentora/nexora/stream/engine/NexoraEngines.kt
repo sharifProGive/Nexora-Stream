@@ -177,11 +177,8 @@ object NexoraP2PShare {
     data class P2PDevice(val id: String, val name: String, val status: String)
 
     fun getNearbyPeers(): List<P2PDevice> {
-        return listOf(
-            P2PDevice("p2p_01", "Nexora-Desk (Zentora)", "Ready"),
-            P2PDevice("p2p_02", "Nexora-Tablet Pro", "Available"),
-            P2PDevice("p2p_03", "Zentora-Home Station", "Paired")
-        )
+        // Zero dummy devices: Returns strictly real discovered peers
+        return emptyList()
     }
 
     fun createSharePackage(video: VideoEntity): String {
@@ -210,10 +207,10 @@ object NexoraIdManager {
 
     private var activeSession = NexoraSession(
         nexoraId = "NX-${UUID.randomUUID().toString().take(8).uppercase()}",
-        username = "Zentora Core Member",
-        email = "core@zentora.org",
-        handle = "@zentora_core",
-        avatarUri = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80",
+        username = "",
+        email = "",
+        handle = "",
+        avatarUri = "",
         isCreatorMode = true,
         zentoraAuthToken = "ZT-${UUID.randomUUID()}",
         creatorLevel = "Rising Creator",
@@ -222,11 +219,12 @@ object NexoraIdManager {
 
     fun getSession(): NexoraSession = activeSession
 
-    fun updateSession(username: String, handle: String, isCreatorMode: Boolean) {
+    fun updateSession(username: String, handle: String, isCreatorMode: Boolean, avatarUri: String = "") {
         activeSession = activeSession.copy(
             username = username,
             handle = handle,
-            isCreatorMode = isCreatorMode
+            isCreatorMode = isCreatorMode,
+            avatarUri = avatarUri
         )
     }
 
