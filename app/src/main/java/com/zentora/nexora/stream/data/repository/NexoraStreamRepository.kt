@@ -5,7 +5,11 @@ import android.content.Context
 import com.zentora.nexora.stream.data.database.NexoraDatabase
 import com.zentora.nexora.stream.data.database.entities.*
 import com.zentora.nexora.stream.engine.CommunityShield
+import com.zentora.nexora.stream.engine.InteractRequest
 import com.zentora.nexora.stream.engine.NexoraIdManager
+import com.zentora.nexora.stream.engine.NexoraNetworkClient
+import com.zentora.nexora.stream.engine.PublishVideoRequest
+import com.zentora.nexora.stream.engine.VaultAuditResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -25,6 +29,8 @@ class NexoraStreamRepository(private val context: Context) {
     val likedInteractions: Flow<List<InteractionEntity>> = dao.getLikedInteractions()
     val allCommunityPosts: Flow<List<CommunityPostEntity>> = dao.getAllCommunityPosts()
 
+    fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>> = dao.getVideosByAuthor(authorChannelId)
+
     // Parental Controls & Data Settings State
     private val _isKidsMode = MutableStateFlow(false)
     val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
@@ -38,6 +44,66 @@ class NexoraStreamRepository(private val context: Context) {
     init {
         scope.launch {
             seedInitialCoreDataIfNeeded()
+            syncFeedFromCentralVaults()
+        }
+    }
+
+    /**
+     * DUAL-SYNC LOGIC (Room DB Vault 1 <-> Central Vaults)
+     * When online, sync latest public feed from /api/v1/feed and upsert into local Room entities.
+     * When offline, local Room Database (Vault 1) continues serving all cached videos seamlessly.
+     */
+    suspend fun syncFeedFromCentralVaults(): Result<Int> {
+        return runCatching {
+            val response = NexoraNetworkClient.apiService.getFeed()
+            if (response.isSuccessful && response.body() != null) {
+                val feed = response.body()!!
+                for (item in feed.videos) {
+                    val video = VideoEntity(
+                        id = item.id,
+                        localUri = item.localUri,
+                        title = item.title,
+                        description = item.description,
+                        category = item.category,
+                        tags = item.tags,
+                        timestamp = item.timestamp,
+                        duration = item.duration,
+                        viewCount = item.viewCount,
+                        chapterMarkersJson = item.chapterMarkersJson,
+                        thumbnailUri = item.thumbnailUri,
+                        authorChannelId = item.authorChannelId,
+                        collabChannelId = item.collabChannelId,
+                        isPremiere = item.isPremiere,
+                        premiereScheduledTimeMs = item.premiereScheduledTimeMs
+                    )
+                    dao.insertVideo(video)
+                    if (dao.getInteractionSync(item.id) == null) {
+                        dao.insertInteraction(
+                            InteractionEntity(
+                                videoId = item.id,
+                                likesCount = 0L,
+                                dislikesCount = 0L,
+                                isLikedByMe = false,
+                                isDislikedByMe = false,
+                                savedToWatchLater = false,
+                                sparksReceived = 0L
+                            )
+                        )
+                    }
+                }
+                feed.videos.size
+            } else {
+                0
+            }
+        }
+    }
+
+    suspend fun auditVaultIntegrity(): VaultAuditResponse? {
+        return try {
+            val response = NexoraNetworkClient.apiService.auditVaults()
+            if (response.isSuccessful) response.body() else null
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -159,6 +225,20 @@ class NexoraStreamRepository(private val context: Context) {
                 retentionScore = retention
             )
         )
+        // NCP Protocol: Asynchronously dispatch real-time view to Central Vaults
+        scope.launch {
+            try {
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        viewDelta = 1L,
+                        nexoraId = NexoraIdManager.getSession().nexoraId
+                    )
+                )
+            } catch (_: Exception) {
+                // Room DB Vault 1 preserves local views when offline
+            }
+        }
     }
 
     suspend fun uploadVideo(
@@ -203,6 +283,28 @@ class NexoraStreamRepository(private val context: Context) {
                 sparksReceived = 0L
             )
         )
+        // NCP Protocol: Register uploaded video to Vault 3 and lock into Vault 5 Grand Master
+        scope.launch {
+            try {
+                val session = NexoraIdManager.getSession()
+                NexoraNetworkClient.apiService.publishVideo(
+                    PublishVideoRequest(
+                        videoId = newVideo.id,
+                        title = title,
+                        description = description,
+                        category = category,
+                        tags = tags,
+                        mediaUri = localUri,
+                        thumbnailUri = thumbnailUri,
+                        duration = duration,
+                        authorChannelId = newVideo.authorChannelId,
+                        nexoraAuthToken = session.zentoraAuthToken
+                    )
+                )
+            } catch (_: Exception) {
+                // Offline fallback: Persisted locally in Vault 1 Room DB
+            }
+        }
         return newVideo
     }
 
@@ -247,6 +349,21 @@ class NexoraStreamRepository(private val context: Context) {
                 dislikesCount = newDislikes
             )
         )
+
+        // NCP Protocol: Asynchronously dispatch like update to Vault 2 and Vault 5
+        scope.launch {
+            try {
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        likeDelta = if (newLiked) 1L else -1L,
+                        nexoraId = NexoraIdManager.getSession().nexoraId
+                    )
+                )
+            } catch (_: Exception) {
+                // Room DB Vault 1 preserves local interaction state
+            }
+        }
     }
 
     suspend fun toggleDislike(videoId: String) {
@@ -273,6 +390,20 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun sendSparks(videoId: String, sparks: Long) {
         dao.addSparks(videoId, sparks)
+        // NCP Protocol: Asynchronously dispatch spark count to Vault 2 and Vault 5
+        scope.launch {
+            try {
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        sparksDelta = sparks,
+                        nexoraId = NexoraIdManager.getSession().nexoraId
+                    )
+                )
+            } catch (_: Exception) {
+                // Local Vault 1 preserves sparks count
+            }
+        }
     }
 
     // ==================== COMMENTS & COMMUNITY SHIELD ====================

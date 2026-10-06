@@ -3,6 +3,7 @@ package com.zentora.nexora.stream.ui.components
 
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,21 +29,26 @@ import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.CommentEntity
 import com.zentora.nexora.stream.ui.theme.*
 
+/**
+ * Top App Bar matching YouTube screenshot (14-21-38):
+ * Left: Brand logo (Red play badge + Nexora Stream)
+ * Right: Cast icon, Notifications Bell icon, Search icon.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NexoraStreamTopAppBar(
     onSearchClick: () -> Unit,
-    onP2PClick: () -> Unit,
-    onProfileClick: () -> Unit,
-    isKidsMode: Boolean,
-    userAvatarUri: String
+    onCastClick: () -> Unit = {},
+    onNotificationClick: () -> Unit = {},
+    isKidsMode: Boolean = false,
+    userAvatarUri: String = ""
 ) {
     TopAppBar(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(30.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(NexoraRed),
                     contentAlignment = Alignment.Center
@@ -55,81 +61,58 @@ fun NexoraStreamTopAppBar(
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "Nexora Stream",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = (-0.3).sp
-                            ),
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        if (isKidsMode) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = NexoraZentoraBlue
-                            ) {
-                                Text(
-                                    text = "KIDS",
-                                    color = Color.Black,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Black,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                )
-                            }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Nexora Stream",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.3).sp
+                        ),
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    if (isKidsMode) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = NexoraZentoraBlue
+                        ) {
+                            Text(
+                                text = "KIDS",
+                                color = Color.Black,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
                         }
                     }
-                    Text(
-                        text = "by Zentora CLC",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
         },
         actions = {
-            // P2P Share Quick Icon (Feature 30)
-            IconButton(onClick = onP2PClick, modifier = Modifier.testTag("p2p_share_button")) {
+            // 1. Cast Icon
+            IconButton(onClick = onCastClick, modifier = Modifier.size(40.dp)) {
                 Icon(
-                    imageVector = Icons.Outlined.WifiTethering,
-                    contentDescription = "Nexora P2P Share",
+                    imageVector = Icons.Outlined.Cast,
+                    contentDescription = "Cast",
                     tint = MaterialTheme.colorScheme.onBackground
                 )
             }
 
-            // Search Icon
-            IconButton(onClick = onSearchClick, modifier = Modifier.testTag("search_button")) {
+            // 2. Notification Bell Icon
+            IconButton(onClick = onNotificationClick, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.Notifications,
+                    contentDescription = "Notifications",
+                    tint = MaterialTheme.colorScheme.onBackground
+                )
+            }
+
+            // 3. Search Icon
+            IconButton(onClick = onSearchClick, modifier = Modifier.size(40.dp).testTag("search_button")) {
                 Icon(
                     imageVector = Icons.Outlined.Search,
                     contentDescription = "Search",
                     tint = MaterialTheme.colorScheme.onBackground
-                )
-            }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            // Profile Avatar with Verified Badge
-            Box(
-                modifier = Modifier
-                    .padding(end = 12.dp)
-                    .clickable { onProfileClick() }
-            ) {
-                AsyncImage(
-                    model = userAvatarUri,
-                    contentDescription = "Nexora ID Profile",
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(CircleShape),
-                    contentScale = ContentScale.Crop
-                )
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(NexoraVerifiedTick)
                 )
             }
         },
@@ -137,107 +120,178 @@ fun NexoraStreamTopAppBar(
     )
 }
 
+/**
+ * YouTube-style Permanent 5-Tab Layout matching screenshot (14-21-38):
+ * [Home | Shorts | (+) | Subscriptions | You]
+ * - Central (+) is a circle with a border and plus symbol inside.
+ * - Subscriptions has red notification badge dot.
+ * - You displays user avatar circle with border and "You" text.
+ */
 @Composable
 fun NexoraStreamBottomNavBar(
     currentRoute: String,
+    userAvatarUri: String = "",
     onNavigate: (String) -> Unit
 ) {
     NavigationBar(
         containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 8.dp,
-        modifier = Modifier.testTag("stream_bottom_nav_bar")
+        tonalElevation = 6.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .testTag("stream_bottom_nav_bar")
     ) {
+        // 1. Home Tab
         NavigationBarItem(
             icon = {
                 Icon(
                     imageVector = if (currentRoute == "home") Icons.Filled.Home else Icons.Outlined.Home,
-                    contentDescription = "Home"
+                    contentDescription = "Home",
+                    modifier = Modifier.size(23.dp)
                 )
             },
-            label = { Text("Home", fontSize = 10.sp) },
+            label = { Text("Home", fontSize = 10.sp, fontWeight = if (currentRoute == "home") FontWeight.Bold else FontWeight.Normal) },
             selected = currentRoute == "home",
             onClick = { onNavigate("home") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = NexoraRed, selectedTextColor = NexoraRed)
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                indicatorColor = Color.Transparent
+            )
         )
 
+        // 2. Shorts Tab
         NavigationBarItem(
             icon = {
                 Icon(
                     imageVector = if (currentRoute == "shorts") Icons.Filled.FlashOn else Icons.Outlined.FlashOn,
-                    contentDescription = "Shorts"
+                    contentDescription = "Shorts",
+                    modifier = Modifier.size(23.dp)
                 )
             },
-            label = { Text("Shorts", fontSize = 10.sp) },
+            label = { Text("Shorts", fontSize = 10.sp, fontWeight = if (currentRoute == "shorts") FontWeight.Bold else FontWeight.Normal) },
             selected = currentRoute == "shorts",
             onClick = { onNavigate("shorts") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = NexoraRed, selectedTextColor = NexoraRed)
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                indicatorColor = Color.Transparent
+            )
         )
 
-        // Studio Button (Center Action)
+        // 3. Central (+) Upload Action Button
         NavigationBarItem(
             icon = {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(NexoraRed),
+                        .border(1.5.dp, MaterialTheme.colorScheme.onSurface, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Add, contentDescription = "Studio", tint = Color.White, modifier = Modifier.size(20.dp))
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = "Create / Upload",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             },
-            label = { Text("Studio", fontSize = 10.sp) },
-            selected = currentRoute == "studio",
-            onClick = { onNavigate("studio") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = Color.White, selectedTextColor = NexoraRed)
+            label = null,
+            selected = currentRoute == "upload",
+            onClick = { onNavigate("upload") },
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = Color.Transparent
+            )
         )
 
-        // Community Tab (Feature 21)
+        // 4. Subscriptions Tab (With red notification dot like in YouTube)
         NavigationBarItem(
             icon = {
-                Icon(
-                    imageVector = if (currentRoute == "community") Icons.Filled.Forum else Icons.Outlined.Forum,
-                    contentDescription = "Community"
-                )
+                Box {
+                    Icon(
+                        imageVector = if (currentRoute == "subscriptions") Icons.Filled.Subscriptions else Icons.Outlined.Subscriptions,
+                        contentDescription = "Subscriptions",
+                        modifier = Modifier.size(22.dp)
+                    )
+                    // Red Notification Dot
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = 2.dp, y = (-2).dp)
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(NexoraRed)
+                    )
+                }
             },
-            label = { Text("Community", fontSize = 10.sp) },
-            selected = currentRoute == "community",
-            onClick = { onNavigate("community") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = NexoraRed, selectedTextColor = NexoraRed)
-        )
-
-        // Subscriptions Tab
-        NavigationBarItem(
-            icon = {
-                Icon(
-                    imageVector = if (currentRoute == "subscriptions") Icons.Filled.Subscriptions else Icons.Outlined.Subscriptions,
-                    contentDescription = "Subscriptions"
-                )
-            },
-            label = { Text("Subscribed", fontSize = 10.sp) },
+            label = { Text("Subscriptions", fontSize = 10.sp, fontWeight = if (currentRoute == "subscriptions") FontWeight.Bold else FontWeight.Normal) },
             selected = currentRoute == "subscriptions",
             onClick = { onNavigate("subscriptions") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = NexoraRed, selectedTextColor = NexoraRed)
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                indicatorColor = Color.Transparent
+            )
         )
 
-        // Library Tab
+        // 5. You Tab (Circular avatar with ring border like screenshot 14-21-38)
+        val isYouSelected = currentRoute == "you" || currentRoute == "library"
         NavigationBarItem(
             icon = {
-                Icon(
-                    imageVector = if (currentRoute == "library") Icons.Filled.VideoLibrary else Icons.Outlined.VideoLibrary,
-                    contentDescription = "Library"
-                )
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .border(
+                            width = if (isYouSelected) 1.5.dp else 1.dp,
+                            color = if (isYouSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                            shape = CircleShape
+                        )
+                ) {
+                    if (userAvatarUri.isNotBlank()) {
+                        AsyncImage(
+                            model = userAvatarUri,
+                            contentDescription = "You Profile",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(NexoraZentoraBlue),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("Z", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                        }
+                    }
+                }
             },
-            label = { Text("Library", fontSize = 10.sp) },
-            selected = currentRoute == "library",
-            onClick = { onNavigate("library") },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = NexoraRed, selectedTextColor = NexoraRed)
+            label = { Text("You", fontSize = 10.sp, fontWeight = if (isYouSelected) FontWeight.Bold else FontWeight.Normal) },
+            selected = isYouSelected,
+            onClick = { onNavigate("you") },
+            colors = NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                indicatorColor = Color.Transparent
+            )
         )
     }
 }
 
 /**
- * Feature 23 & 27: Dynamic Comments BottomSheet with Community Guideline Shield active.
+ * Dynamic Comments BottomSheet with Community Guideline Shield active.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -288,7 +342,12 @@ fun StreamCommentsBottomSheet(
 
             // Comments List
             if (comments.isEmpty()) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text("No comments yet. Be the first to start the discussion!", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {

@@ -65,4 +65,52 @@ class NexoraStreamUnitTest {
         assertEquals(2, ranked.size)
         assertEquals("Video with higher retention & affinity should rank first", "1", ranked.first().id)
     }
+
+    @Test
+    fun testNcpNetworkClientConfiguration() {
+        assertNotNull("API service instance must be initialized", NexoraNetworkClient.apiService)
+        assertTrue("Base URL should point to Zentora service", NexoraNetworkClient.getBaseUrl().contains("zentora"))
+
+        val testUrl = "https://custom.zentora.cloud/api/"
+        NexoraNetworkClient.updateBaseUrl(testUrl)
+        assertEquals("Updated URL should match", testUrl, NexoraNetworkClient.getBaseUrl())
+
+        // Revert back to default
+        NexoraNetworkClient.updateBaseUrl("https://stream.zentora.internal/")
+    }
+
+    @Test
+    fun testNcpProtocolDtoIntegrity() {
+        val publishReq = PublishVideoRequest(
+            videoId = "vid_ncp_test",
+            title = "NCP Test Stream",
+            description = "Dual sync validation",
+            category = "Tech",
+            tags = "NCP, Vault",
+            mediaUri = "nexora://drm-secure/123",
+            thumbnailUri = "https://example.com/thumb.jpg",
+            duration = 120000L,
+            authorChannelId = "ch_zentora_core",
+            nexoraAuthToken = "ZT-TEST"
+        )
+        assertEquals("vid_ncp_test", publishReq.videoId)
+
+        val interactReq = InteractRequest(
+            videoId = "vid_ncp_test",
+            viewDelta = 1L,
+            likeDelta = 1L,
+            sparksDelta = 10L,
+            nexoraId = "NX-TEST"
+        )
+        assertEquals(1L, interactReq.viewDelta)
+        assertEquals(10L, interactReq.sparksDelta)
+    }
+
+    @Test
+    fun testVault4BlobstoreEndpoint() {
+        assertEquals(
+            "https://nexora-backend-fq54.onrender.com/api/v1/videos/upload-stream",
+            NexoraNetworkClient.VAULT_4_BLOBSTORE_URL
+        )
+    }
 }

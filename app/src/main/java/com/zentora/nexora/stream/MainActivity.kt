@@ -54,13 +54,19 @@ class MainActivity : ComponentActivity() {
                                 selectedVideoId = null
                                 currentRoute = "home"
                             }
+                            "channel" -> {
+                                currentRoute = "you"
+                            }
+                            "upload" -> {
+                                currentRoute = "home"
+                            }
                             else -> currentRoute = "home"
                         }
                     }
                 }
 
-                val showTopBar = currentRoute in listOf("home", "community", "subscriptions", "library")
-                val showBottomBar = currentRoute in listOf("home", "shorts", "studio", "community", "subscriptions", "library")
+                val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
+                val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
@@ -68,8 +74,8 @@ class MainActivity : ComponentActivity() {
                         if (showTopBar) {
                             NexoraStreamTopAppBar(
                                 onSearchClick = { currentRoute = "search" },
-                                onP2PClick = { currentRoute = "library" },
-                                onProfileClick = { currentRoute = "settings" },
+                                onCastClick = { currentRoute = "you" },
+                                onNotificationClick = { currentRoute = "you" },
                                 isKidsMode = isKidsMode,
                                 userAvatarUri = userSession.avatarUri
                             )
@@ -79,6 +85,7 @@ class MainActivity : ComponentActivity() {
                         if (showBottomBar) {
                             NexoraStreamBottomNavBar(
                                 currentRoute = currentRoute,
+                                userAvatarUri = userSession.avatarUri,
                                 onNavigate = { route -> currentRoute = route }
                             )
                         }
@@ -99,7 +106,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onChannelClick = { chId ->
                                         selectedChannelId = chId
-                                        currentRoute = "subscriptions"
+                                        currentRoute = "channel"
                                     }
                                 )
                             }
@@ -108,26 +115,15 @@ class MainActivity : ComponentActivity() {
                                     repository = repository,
                                     onChannelClick = { chId ->
                                         selectedChannelId = chId
-                                        currentRoute = "subscriptions"
+                                        currentRoute = "channel"
                                     }
                                 )
                             }
-                            "studio" -> {
-                                StudioScreen(
+                            "upload" -> {
+                                UploadStudioScreen(
                                     repository = repository,
-                                    onVideoClick = { vId ->
-                                        selectedVideoId = vId
-                                        currentRoute = "player"
-                                    }
-                                )
-                            }
-                            "community" -> {
-                                CommunityScreen(
-                                    repository = repository,
-                                    onChannelClick = { chId ->
-                                        selectedChannelId = chId
-                                        currentRoute = "subscriptions"
-                                    }
+                                    onUploadComplete = { currentRoute = "you" },
+                                    onClose = { currentRoute = "home" }
                                 )
                             }
                             "subscriptions" -> {
@@ -135,17 +131,33 @@ class MainActivity : ComponentActivity() {
                                     repository = repository,
                                     onChannelClick = { chId ->
                                         selectedChannelId = chId
+                                        currentRoute = "channel"
                                     }
                                 )
                             }
-                            "library" -> {
-                                LibraryScreen(
+                            "you" -> {
+                                YouProfileScreen(
                                     repository = repository,
                                     onVideoClick = { vId ->
                                         selectedVideoId = vId
                                         currentRoute = "player"
                                     },
+                                    onViewChannel = { chId ->
+                                        selectedChannelId = chId
+                                        currentRoute = "channel"
+                                    },
                                     onSettingsClick = { currentRoute = "settings" }
+                                )
+                            }
+                            "channel" -> {
+                                ChannelScreen(
+                                    channelId = selectedChannelId ?: "ch_zentora_core",
+                                    repository = repository,
+                                    onBack = { currentRoute = "you" },
+                                    onVideoClick = { vId ->
+                                        selectedVideoId = vId
+                                        currentRoute = "player"
+                                    }
                                 )
                             }
                             "player" -> {
@@ -162,7 +174,7 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onChannelClick = { chId ->
                                             selectedChannelId = chId
-                                            currentRoute = "subscriptions"
+                                            currentRoute = "channel"
                                         }
                                     )
                                 }

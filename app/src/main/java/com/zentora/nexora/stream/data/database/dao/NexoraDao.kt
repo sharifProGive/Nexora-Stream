@@ -30,6 +30,9 @@ interface NexoraDao {
     @Query("UPDATE videos SET viewCount = viewCount + 1 WHERE id = :id")
     suspend fun incrementViewCount(id: String)
 
+    @Query("SELECT * FROM videos WHERE authorChannelId = :authorChannelId ORDER BY timestamp DESC")
+    fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>>
+
     @Query("SELECT * FROM videos WHERE category = :category ORDER BY timestamp DESC")
     fun getVideosByCategory(category: String): Flow<List<VideoEntity>>
 
