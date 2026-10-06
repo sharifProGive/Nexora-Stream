@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "com.zentora.nexora.stream"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.zentora.nexora.stream"
@@ -42,7 +42,6 @@ android {
         }
         debug {
             isMinifyEnabled = false
-            // ডিফল্ট অ্যান্ড্রয়েড ডিবাগ সাইনিং ব্যবহার করা হয়েছে, কোনো বাহ্যিক ফাইলের প্রয়োজন নেই
             signingConfig = signingConfigs.getByName("debug")
         }
     }
