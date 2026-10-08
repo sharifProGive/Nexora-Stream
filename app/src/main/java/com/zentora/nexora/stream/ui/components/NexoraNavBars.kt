@@ -48,16 +48,14 @@ fun NexoraStreamTopAppBar(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(NexoraRed),
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.PlayArrow,
-                        contentDescription = "Nexora Stream Logo",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(id = com.zentora.nexora.stream.R.drawable.nexora_infinity_logo),
+                        contentDescription = "Nexora Stream Infinity Logo",
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))

@@ -31,146 +31,95 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Initialize Vault 1 session and Room Database repository
+        NexoraIdManager.initSession(applicationContext)
         repository = NexoraStreamRepository.getInstance(applicationContext)
 
         setContent {
             val isKidsMode by repository.isKidsMode.collectAsState()
-            val userSession = remember { NexoraIdManager.getSession() }
+            val userSession by NexoraIdManager.sessionFlow.collectAsState()
 
             NexoraStreamTheme(darkTheme = true) {
-                var currentRoute by remember { mutableStateOf("home") }
-                var selectedVideoId by remember { mutableStateOf<String?>(null) }
-                var selectedChannelId by remember { mutableStateOf<String?>(null) }
+                // Check if user has an active session in Vault 1 (Room DB / DataStore / Prefs)
+                val hasInitialSession = remember { NexoraIdManager.hasActiveSession(applicationContext) }
+                var isAuthenticated by remember { mutableStateOf(hasInitialSession) }
 
-                LaunchedEffect(selectedVideoId) {
-                    activePlayingVideoId = selectedVideoId
-                }
+                if (!isAuthenticated) {
+                    // Mandatory First-Run Authentication Gateway
+                    AuthGateScreen(
+                        onAuthenticated = {
+                            isAuthenticated = true
+                        },
+                        onGuestMode = {
+                            isAuthenticated = true
+                        }
+                    )
+                } else {
+                    var currentRoute by remember { mutableStateOf("home") }
+                    var selectedVideoId by remember { mutableStateOf<String?>(null) }
+                    var selectedChannelId by remember { mutableStateOf<String?>(null) }
 
-                // Handle back press on sub-routes
-                if (currentRoute != "home") {
-                    BackHandler {
-                        when (currentRoute) {
-                            "player" -> {
-                                selectedVideoId = null
-                                currentRoute = "home"
+                    LaunchedEffect(selectedVideoId) {
+                        activePlayingVideoId = selectedVideoId
+                    }
+
+                    // Handle back press on sub-routes
+                    if (currentRoute != "home") {
+                        BackHandler {
+                            when (currentRoute) {
+                                "player" -> {
+                                    selectedVideoId = null
+                                    currentRoute = "home"
+                                }
+                                "channel" -> {
+                                    currentRoute = "you"
+                                }
+                                "upload" -> {
+                                    currentRoute = "home"
+                                }
+                                else -> currentRoute = "home"
                             }
-                            "channel" -> {
-                                currentRoute = "you"
-                            }
-                            "upload" -> {
-                                currentRoute = "home"
-                            }
-                            else -> currentRoute = "home"
                         }
                     }
-                }
 
-                val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
-                val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
+                    val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
+                    val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
 
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    topBar = {
-                        if (showTopBar) {
-                            NexoraStreamTopAppBar(
-                                onSearchClick = { currentRoute = "search" },
-                                onCastClick = { currentRoute = "you" },
-                                onNotificationClick = { currentRoute = "you" },
-                                isKidsMode = isKidsMode,
-                                userAvatarUri = userSession.avatarUri
-                            )
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize(),
+                        topBar = {
+                            if (showTopBar) {
+                                NexoraStreamTopAppBar(
+                                    onSearchClick = { currentRoute = "search" },
+                                    onCastClick = { currentRoute = "you" },
+                                    onNotificationClick = { currentRoute = "you" },
+                                    isKidsMode = isKidsMode,
+                                    userAvatarUri = userSession.avatarUri
+                                )
+                            }
+                        },
+                        bottomBar = {
+                            if (showBottomBar) {
+                                NexoraStreamBottomNavBar(
+                                    currentRoute = currentRoute,
+                                    userAvatarUri = userSession.avatarUri,
+                                    onNavigate = { route -> currentRoute = route }
+                                )
+                            }
                         }
-                    },
-                    bottomBar = {
-                        if (showBottomBar) {
-                            NexoraStreamBottomNavBar(
-                                currentRoute = currentRoute,
-                                userAvatarUri = userSession.avatarUri,
-                                onNavigate = { route -> currentRoute = route }
-                            )
-                        }
-                    }
-                ) { innerPadding ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    ) {
-                        when (currentRoute) {
-                            "home" -> {
-                                HomeScreen(
-                                    repository = repository,
-                                    onVideoClick = { vId ->
-                                        selectedVideoId = vId
-                                        currentRoute = "player"
-                                    },
-                                    onChannelClick = { chId ->
-                                        selectedChannelId = chId
-                                        currentRoute = "channel"
-                                    }
-                                )
-                            }
-                            "shorts" -> {
-                                ShortsScreen(
-                                    repository = repository,
-                                    onChannelClick = { chId ->
-                                        selectedChannelId = chId
-                                        currentRoute = "channel"
-                                    }
-                                )
-                            }
-                            "upload" -> {
-                                UploadStudioScreen(
-                                    repository = repository,
-                                    onUploadComplete = { currentRoute = "you" },
-                                    onClose = { currentRoute = "home" }
-                                )
-                            }
-                            "subscriptions" -> {
-                                SubscriptionsScreen(
-                                    repository = repository,
-                                    onChannelClick = { chId ->
-                                        selectedChannelId = chId
-                                        currentRoute = "channel"
-                                    }
-                                )
-                            }
-                            "you" -> {
-                                YouProfileScreen(
-                                    repository = repository,
-                                    onVideoClick = { vId ->
-                                        selectedVideoId = vId
-                                        currentRoute = "player"
-                                    },
-                                    onViewChannel = { chId ->
-                                        selectedChannelId = chId
-                                        currentRoute = "channel"
-                                    },
-                                    onSettingsClick = { currentRoute = "settings" }
-                                )
-                            }
-                            "channel" -> {
-                                ChannelScreen(
-                                    channelId = selectedChannelId ?: "ch_zentora_core",
-                                    repository = repository,
-                                    onBack = { currentRoute = "you" },
-                                    onVideoClick = { vId ->
-                                        selectedVideoId = vId
-                                        currentRoute = "player"
-                                    }
-                                )
-                            }
-                            "player" -> {
-                                selectedVideoId?.let { vId ->
-                                    PlayerScreen(
-                                        videoId = vId,
+                    ) { innerPadding ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(innerPadding)
+                        ) {
+                            when (currentRoute) {
+                                "home" -> {
+                                    HomeScreen(
                                         repository = repository,
-                                        onBack = {
-                                            selectedVideoId = null
-                                            currentRoute = "home"
-                                        },
-                                        onNavigateVideo = { newId ->
-                                            selectedVideoId = newId
+                                        onVideoClick = { vId ->
+                                            selectedVideoId = vId
+                                            currentRoute = "player"
                                         },
                                         onChannelClick = { chId ->
                                             selectedChannelId = chId
@@ -178,22 +127,95 @@ class MainActivity : ComponentActivity() {
                                         }
                                     )
                                 }
-                            }
-                            "search" -> {
-                                SearchScreen(
-                                    repository = repository,
-                                    onBack = { currentRoute = "home" },
-                                    onVideoClick = { vId ->
-                                        selectedVideoId = vId
-                                        currentRoute = "player"
+                                "shorts" -> {
+                                    ShortsScreen(
+                                        repository = repository,
+                                        onChannelClick = { chId ->
+                                            selectedChannelId = chId
+                                            currentRoute = "channel"
+                                        }
+                                    )
+                                }
+                                "upload" -> {
+                                    UploadStudioScreen(
+                                        repository = repository,
+                                        onUploadComplete = { currentRoute = "you" },
+                                        onClose = { currentRoute = "home" }
+                                    )
+                                }
+                                "subscriptions" -> {
+                                    SubscriptionsScreen(
+                                        repository = repository,
+                                        onChannelClick = { chId ->
+                                            selectedChannelId = chId
+                                            currentRoute = "channel"
+                                        },
+                                        onVideoClick = { vId ->
+                                            selectedVideoId = vId
+                                            currentRoute = "player"
+                                        }
+                                    )
+                                }
+                                "you" -> {
+                                    YouProfileScreen(
+                                        repository = repository,
+                                        onVideoClick = { vId ->
+                                            selectedVideoId = vId
+                                            currentRoute = "player"
+                                        },
+                                        onViewChannel = { chId ->
+                                            selectedChannelId = chId
+                                            currentRoute = "channel"
+                                        },
+                                        onSettingsClick = { currentRoute = "settings" }
+                                    )
+                                }
+                                "channel" -> {
+                                    ChannelScreen(
+                                        channelId = selectedChannelId ?: "ch_zentora_core",
+                                        repository = repository,
+                                        onBack = { currentRoute = "you" },
+                                        onVideoClick = { vId ->
+                                            selectedVideoId = vId
+                                            currentRoute = "player"
+                                        }
+                                    )
+                                }
+                                "player" -> {
+                                    selectedVideoId?.let { vId ->
+                                        PlayerScreen(
+                                            videoId = vId,
+                                            repository = repository,
+                                            onBack = {
+                                                selectedVideoId = null
+                                                currentRoute = "home"
+                                            },
+                                            onNavigateVideo = { newId ->
+                                                selectedVideoId = newId
+                                            },
+                                            onChannelClick = { chId ->
+                                                selectedChannelId = chId
+                                                currentRoute = "channel"
+                                            }
+                                        )
                                     }
-                                )
-                            }
-                            "settings" -> {
-                                SettingsScreen(
-                                    repository = repository,
-                                    onBack = { currentRoute = "home" }
-                                )
+                                }
+                                "search" -> {
+                                    SearchScreen(
+                                        repository = repository,
+                                        onBack = { currentRoute = "home" },
+                                        onVideoClick = { vId ->
+                                            selectedVideoId = vId
+                                            currentRoute = "player"
+                                        }
+                                    )
+                                }
+                                "settings" -> {
+                                    SettingsScreen(
+                                        repository = repository,
+                                        onBack = { currentRoute = "home" }
+                                    )
+                                }
                             }
                         }
                     }

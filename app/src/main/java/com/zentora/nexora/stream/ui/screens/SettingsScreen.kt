@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -17,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -27,11 +29,18 @@ import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.ui.components.ParentalControlDialog
-import com.zentora.nexora.stream.ui.theme.NexoraRed
-import com.zentora.nexora.stream.ui.theme.NexoraSparkGold
-import com.zentora.nexora.stream.ui.theme.NexoraSuccess
-import com.zentora.nexora.stream.ui.theme.NexoraVerifiedTick
+import com.zentora.nexora.stream.ui.theme.*
 
+/**
+ * SettingsScreen (Module 2):
+ * Official YouTube-style hierarchical settings screen:
+ * - General
+ * - Data saving
+ * - Autoplay
+ * - Video quality preferences
+ * - Downloads
+ * - About Nexora Stream
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -47,15 +56,27 @@ fun SettingsScreen(
     var showAboutDialog by remember { mutableStateOf(false) }
     var showEditProfileDialog by remember { mutableStateOf(false) }
 
+    // Dialog toggles for nested sections
+    var showGeneralDialog by remember { mutableStateOf(false) }
+    var showAutoplayDialog by remember { mutableStateOf(false) }
+    var showVideoQualityDialog by remember { mutableStateOf(false) }
+    var showDownloadsDialog by remember { mutableStateOf(false) }
+
+    // Local toggles connected to settings
+    var autoplayNextVideo by remember { mutableStateOf(true) }
+    var downloadOverWifiOnly by remember { mutableStateOf(true) }
+    var defaultQualityPreference by remember { mutableStateOf("Auto (recommended)") }
+    var doubleTapToSeekSec by remember { mutableStateOf(10) }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                title = { Text("Settings & Nexora ID", fontWeight = FontWeight.Bold) },
+                title = { Text("Settings", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
@@ -66,193 +87,259 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .testTag("settings_screen"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            // Feature 1: Nexora ID Single Sign-On System Card
+            // Profile & Account Summary Card
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Badge, contentDescription = null, tint = NexoraRed)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Nexora ID Authentication", fontWeight = FontWeight.Bold, color = NexoraRed)
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
+                    Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box {
                                 AsyncImage(
-                                    model = session.avatarUri,
+                                    model = session.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150" },
                                     contentDescription = "Avatar",
-                                    modifier = Modifier.size(56.dp).clip(CircleShape),
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(CircleShape),
                                     contentScale = ContentScale.Crop
                                 )
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .size(16.dp)
+                                        .size(14.dp)
                                         .clip(CircleShape)
                                         .background(NexoraVerifiedTick),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(Icons.Filled.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(10.dp))
+                                    Icon(Icons.Filled.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(9.dp))
                                 }
                             }
 
-                            Spacer(modifier = Modifier.width(14.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(session.username, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text(session.username, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                                 Text(session.email, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text("Token: ${session.zentoraAuthToken.take(16)}…", fontSize = 10.sp, color = NexoraSparkGold)
                             }
-                        }
 
-                        Spacer(modifier = Modifier.height(10.dp))
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text("Creator Mode Status", fontWeight = FontWeight.SemiBold)
-                                Text(if (session.isCreatorMode) "Studio & Upload Enabled" else "Viewer Mode", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(
-                                checked = session.isCreatorMode,
-                                onCheckedChange = {
-                                    NexoraIdManager.updateSession(session.username, session.handle, it)
-                                    session = NexoraIdManager.getSession()
-                                    Toast.makeText(context, if (it) "Creator Mode active" else "Viewer Mode active", Toast.LENGTH_SHORT).show()
-                                },
-                                colors = SwitchDefaults.colors(checkedTrackColor = NexoraRed)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(
-                            onClick = { showEditProfileDialog = true },
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Edit Nexora ID Profile")
-                        }
-                    }
-                }
-            }
-
-            // Feature 28: Nexora Smart Sync (Low-Data Saver mode)
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.DataSaverOn, contentDescription = null, tint = NexoraSuccess)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Nexora Smart Sync (Data Saver)", fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Low-Data Saver Mode", fontWeight = FontWeight.SemiBold)
-                                Text("Optimizes buffer chunks and reduces background telemetry consumption", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Switch(
-                                checked = isDataSaver,
-                                onCheckedChange = {
-                                    repository.setDataSaver(it)
-                                    Toast.makeText(context, if (it) "Smart Sync Data Saver ON" else "Data Saver OFF", Toast.LENGTH_SHORT).show()
-                                },
-                                colors = SwitchDefaults.colors(checkedTrackColor = NexoraSuccess)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Feature 29: Parental Control & Kids Mode protected by 4-digit master PIN
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.ChildCare, contentDescription = null, tint = NexoraRed)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Parental Control & Kids Mode", fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Restricted Kids Mode", fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    if (isKidsMode) "Active (Locked by 4-Digit PIN)" else "Inactive (Full catalog visible)",
-                                    fontSize = 11.sp,
-                                    color = if (isKidsMode) NexoraRed else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Button(
-                                onClick = { showParentalControlDialog = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = if (isKidsMode) NexoraRed else MaterialTheme.colorScheme.surface),
+                            OutlinedButton(
+                                onClick = { showEditProfileDialog = true },
+                                shape = RoundedCornerShape(16.dp),
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                             ) {
-                                Text(if (isKidsMode) "Exit PIN" else "Activate", color = if (isKidsMode) Color.White else MaterialTheme.colorScheme.onSurface)
+                                Text("Manage", fontSize = 12.sp)
                             }
                         }
                     }
                 }
             }
 
-            // Feature 31: Settings & Official About Screen
+            // ==================== 1. GENERAL ====================
             item {
-                Card(
-                    onClick = { showAboutDialog = true },
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Info, contentDescription = null, tint = NexoraRed)
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text("About Nexora Stream", fontWeight = FontWeight.Bold)
-                                Text("Zentora CLC • Developer: Zentora • v1.0.0", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                        Icon(Icons.Filled.ChevronRight, contentDescription = null)
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Tune,
+                    title = "General",
+                    subtitle = "App playback, double-tap seek, appearance",
+                    onClick = { showGeneralDialog = true }
+                )
+            }
+
+            // ==================== 2. DATA SAVING ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.DataSaverOn,
+                    title = "Data saving",
+                    subtitle = if (isDataSaver) "Data saving mode is ON" else "Default video quality settings",
+                    trailingWidget = {
+                        Switch(
+                            checked = isDataSaver,
+                            onCheckedChange = {
+                                repository.setDataSaver(it)
+                                Toast.makeText(context, if (it) "Data saver enabled" else "Data saver disabled", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = SwitchDefaults.colors(checkedTrackColor = NexoraRed)
+                        )
+                    },
+                    onClick = {
+                        val newState = !isDataSaver
+                        repository.setDataSaver(newState)
                     }
-                }
+                )
+            }
+
+            // ==================== 3. AUTOPLAY ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.PlayCircleOutline,
+                    title = "Autoplay",
+                    subtitle = if (autoplayNextVideo) "Autoplay next video is ON" else "Autoplay next video is OFF",
+                    onClick = { showAutoplayDialog = true }
+                )
+            }
+
+            // ==================== 4. VIDEO QUALITY PREFERENCES ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.HighQuality,
+                    title = "Video quality preferences",
+                    subtitle = defaultQualityPreference,
+                    onClick = { showVideoQualityDialog = true }
+                )
+            }
+
+            // ==================== 5. DOWNLOADS ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Download,
+                    title = "Downloads",
+                    subtitle = if (downloadOverWifiOnly) "Download over Wi-Fi only" else "Download over any network",
+                    onClick = { showDownloadsDialog = true }
+                )
+            }
+
+            // ==================== 6. PARENTAL CONTROLS ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.ChildCare,
+                    title = "Kids & Restricted mode",
+                    subtitle = if (isKidsMode) "Active (Locked with PIN)" else "Inactive (All content visible)",
+                    onClick = { showParentalControlDialog = true }
+                )
+            }
+
+            // ==================== 7. ABOUT ====================
+            item {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Info,
+                    title = "About",
+                    subtitle = "Nexora Stream · Zentora CLC · v1.0.0",
+                    onClick = { showAboutDialog = true }
+                )
             }
         }
     }
 
-    // Feature 29: Parental Control Dialog
+    // --- Sub-Dialogs ---
+
+    // General Dialog
+    if (showGeneralDialog) {
+        AlertDialog(
+            onDismissRequest = { showGeneralDialog = false },
+            title = { Text("General", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Double-tap to seek", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    listOf(5, 10, 15, 20).forEach { sec ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { doubleTapToSeekSec = sec }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(selected = doubleTapToSeekSec == sec, onClick = { doubleTapToSeekSec = sec })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("$sec seconds", fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showGeneralDialog = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // Autoplay Dialog
+    if (showAutoplayDialog) {
+        AlertDialog(
+            onDismissRequest = { showAutoplayDialog = false },
+            title = { Text("Autoplay", fontWeight = FontWeight.Bold) },
+            text = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Autoplay next video", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                        Text("When you finish a video, another plays automatically", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = autoplayNextVideo,
+                        onCheckedChange = { autoplayNextVideo = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = NexoraRed)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAutoplayDialog = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // Video Quality Dialog
+    if (showVideoQualityDialog) {
+        val qualities = listOf("Auto (recommended)", "Higher picture quality", "Data saver (360p - 480p)")
+        AlertDialog(
+            onDismissRequest = { showVideoQualityDialog = false },
+            title = { Text("Video quality preferences", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    qualities.forEach { q ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { defaultQualityPreference = q }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(selected = defaultQualityPreference == q, onClick = { defaultQualityPreference = q })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(q, fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVideoQualityDialog = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // Downloads Dialog
+    if (showDownloadsDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloadsDialog = false },
+            title = { Text("Downloads", fontWeight = FontWeight.Bold) },
+            text = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Download over Wi-Fi only", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                        Text("Avoid carrier cellular data charges", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = downloadOverWifiOnly,
+                        onCheckedChange = { downloadOverWifiOnly = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = NexoraRed)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloadsDialog = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // Parental Controls Dialog
     if (showParentalControlDialog) {
         ParentalControlDialog(
             isCurrentlyKidsMode = isKidsMode,
@@ -263,13 +350,19 @@ fun SettingsScreen(
         )
     }
 
-    // Feature 31: Official About Dialog
+    // About Dialog
     if (showAboutDialog) {
         AlertDialog(
             onDismissRequest = { showAboutDialog = false },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).background(NexoraRed), contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(NexoraRed),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                     }
                     Spacer(modifier = Modifier.width(8.dp))
@@ -277,19 +370,17 @@ fun SettingsScreen(
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Application Name: Nexora Stream", fontWeight = FontWeight.Bold)
                     Text("Organization: Zentora CLC", fontWeight = FontWeight.Bold)
                     Text("Developer: Zentora", fontWeight = FontWeight.Bold)
                     Text("Package: com.zentora.nexora.stream")
                     Text("Version: 1.0.0")
-                    Text("Output Artifact: Nexora-Stream-v1.0.apk")
-                    Text("Target Repository: sharifProGive/nexora-app (main)")
                     Spacer(modifier = Modifier.height(4.dp))
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "MIT Open-Source License\n\nCopyright (c) 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.",
+                        text = "Copyright (c) 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora.",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -303,7 +394,7 @@ fun SettingsScreen(
         )
     }
 
-    // Edit Nexora ID Profile Dialog
+    // Edit Profile Dialog
     if (showEditProfileDialog) {
         var uName by remember { mutableStateOf(session.username) }
         var uHandle by remember { mutableStateOf(session.handle) }
@@ -323,7 +414,7 @@ fun SettingsScreen(
                         NexoraIdManager.updateSession(uName.trim(), uHandle.trim(), session.isCreatorMode)
                         session = NexoraIdManager.getSession()
                         showEditProfileDialog = false
-                        Toast.makeText(context, "Nexora ID updated", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Profile updated", Toast.LENGTH_SHORT).show()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = NexoraRed)
                 ) { Text("Save") }
@@ -332,5 +423,44 @@ fun SettingsScreen(
                 TextButton(onClick = { showEditProfileDialog = false }) { Text("Cancel") }
             }
         )
+    }
+}
+
+@Composable
+private fun SettingsCategoryRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    trailingWidget: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Medium, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (trailingWidget != null) {
+            trailingWidget()
+        } else {
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
     }
 }

@@ -215,44 +215,51 @@ fun ChannelScreen(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // ==================== 3. ACTION BUTTON ROW ====================
-                    // "Analytics", "Edit channel", and "Community"
+                    // ==================== 3. OFFICIAL YOUTUBE ACTION PILLS ====================
                     if (isMyChannel) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Button(
-                                onClick = { showAnalyticsModal = true },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(20.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                            ) {
-                                Icon(Icons.Outlined.Analytics, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Analytics", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                            }
-
-                            Button(
+                            FilledTonalButton(
                                 onClick = {},
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(20.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(38.dp),
+                                shape = RoundedCornerShape(19.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0xFF272727),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
                             ) {
-                                Icon(Icons.Outlined.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Edit channel", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Manage videos", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                             }
 
-                            Button(
-                                onClick = { selectedTab = ChannelSubTab.PLAYLISTS },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(20.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            FilledTonalButton(
+                                onClick = { showAnalyticsModal = true },
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0xFF272727),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(0.dp)
                             ) {
-                                Icon(Icons.Outlined.Forum, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Community", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Icon(Icons.Outlined.Analytics, contentDescription = "Analytics", modifier = Modifier.size(18.dp))
+                            }
+
+                            FilledTonalButton(
+                                onClick = {},
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0xFF272727),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Icon(Icons.Outlined.Edit, contentDescription = "Edit channel", modifier = Modifier.size(18.dp))
                             }
                         }
                     } else {
@@ -460,8 +467,8 @@ fun ChannelScreen(
                         modifier = Modifier.weight(1f)
                     )
                     AnalyticsStatCard(
-                        title = "Vault Storage",
-                        value = "Vault 1 + 4",
+                        title = "Storage Status",
+                        value = "Cloud Synced",
                         modifier = Modifier.weight(1f)
                     )
                 }

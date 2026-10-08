@@ -14,16 +14,19 @@
                 android:endX="108"
                 android:endY="108"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#141419" />
-                <item android:offset="0.5" android:color="#1A0D15" />
-                <item android:offset="1.0" android:color="#2B0C18" />
+                <item android:offset="0.0" android:color="#002633" />
+                <item android:offset="0.4" android:color="#06070B" />
+                <item android:offset="0.7" android:color="#0B060D" />
+                <item android:offset="1.0" android:color="#33001E" />
             </gradient>
         </aapt:attr>
     </path>
-    <!-- Subtle geometric ring overlay -->
+    <!-- Cyan Ambient Halo Top-Left -->
     <path
-        android:pathData="M54,18 A36,36 0 1,0 54,90 A36,36 0 1,0 54,18"
-        android:strokeWidth="1.2"
-        android:strokeColor="#1FFFFFFF"
-        android:fillColor="#00000000" />
+        android:pathData="M0,0 L54,0 C24,0 0,24 0,54 Z"
+        android:fillColor="#3300E5FF" />
+    <!-- Magenta Ambient Halo Bottom-Right -->
+    <path
+        android:pathData="M108,108 L54,108 C84,108 108,84 108,54 Z"
+        android:fillColor="#33FF007F" />
 </vector>

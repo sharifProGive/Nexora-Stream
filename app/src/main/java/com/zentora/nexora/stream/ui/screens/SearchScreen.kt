@@ -39,7 +39,13 @@ fun SearchScreen(
     var searchQuery by remember { mutableStateOf("") }
     val allVideos by repository.allVideos.collectAsState(initial = emptyList())
 
-    // In-House Nexora Semantic Search
+    // In-House Nexora Semantic Search + Central Registry Query
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isNotBlank()) {
+            repository.searchGlobalVaults(searchQuery.trim())
+        }
+    }
+
     val searchResults = remember(searchQuery, allVideos) {
         NexoraSemanticSearch.search(allVideos, searchQuery)
     }

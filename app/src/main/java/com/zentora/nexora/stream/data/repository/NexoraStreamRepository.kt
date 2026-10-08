@@ -8,7 +8,9 @@ import com.zentora.nexora.stream.engine.CommunityShield
 import com.zentora.nexora.stream.engine.InteractRequest
 import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.NexoraNetworkClient
+import com.zentora.nexora.stream.engine.PostCommentRequest
 import com.zentora.nexora.stream.engine.PublishVideoRequest
+import com.zentora.nexora.stream.engine.RegisterUserRequest
 import com.zentora.nexora.stream.engine.VaultAuditResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +47,7 @@ class NexoraStreamRepository(private val context: Context) {
         scope.launch {
             seedInitialCoreDataIfNeeded()
             syncFeedFromCentralVaults()
+            restoreAccountFromCentralVaults()
         }
     }
 
@@ -94,6 +97,114 @@ class NexoraStreamRepository(private val context: Context) {
                 feed.videos.size
             } else {
                 0
+            }
+        }
+    }
+
+    /**
+     * Account Restoration:
+     * Upon reinstalling and signing into Nexora ID, the app restores the creator's
+     * uploaded videos, channel statistics, and metadata from the central vaults into local Vault 1.
+     */
+    suspend fun registerUserSessionWithCentralVault() {
+        scope.launch {
+            try {
+                val session = NexoraIdManager.getSession()
+                NexoraNetworkClient.apiService.registerUser(
+                    RegisterUserRequest(
+                        nexoraId = session.nexoraId,
+                        username = session.username,
+                        email = session.email,
+                        handle = session.handle,
+                        avatarUri = session.avatarUri,
+                        zentoraAuthToken = session.zentoraAuthToken
+                    )
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
+        return runCatching {
+            val session = NexoraIdManager.getSession()
+            val response = NexoraNetworkClient.apiService.restoreUserProfile(session.nexoraId)
+            if (response.isSuccessful && response.body() != null) {
+                val profile = response.body()!!
+                // Update local channel
+                val channel = ChannelEntity(
+                    channelId = "ch_zentora_core",
+                    channelName = if (profile.username.isNotBlank()) profile.username else "Zentora CLC",
+                    avatarUri = profile.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80" },
+                    bannerUri = "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80",
+                    subscriberCount = profile.subscriberCount,
+                    isSubscribed = false,
+                    creatorLevel = profile.creatorLevel,
+                    hasZentoraBadge = true,
+                    description = "Official channel of Zentora CLC. Restored from Zentora Central Vault 2 & 5."
+                )
+                dao.insertChannel(channel)
+
+                // Restore user's uploaded videos
+                for (item in profile.uploadedVideos) {
+                    val video = VideoEntity(
+                        id = item.id,
+                        localUri = item.localUri,
+                        title = item.title,
+                        description = item.description,
+                        category = item.category,
+                        tags = item.tags,
+                        timestamp = item.timestamp,
+                        duration = item.duration,
+                        viewCount = item.viewCount,
+                        chapterMarkersJson = item.chapterMarkersJson,
+                        thumbnailUri = item.thumbnailUri,
+                        authorChannelId = item.authorChannelId,
+                        collabChannelId = item.collabChannelId,
+                        isPremiere = item.isPremiere,
+                        premiereScheduledTimeMs = item.premiereScheduledTimeMs
+                    )
+                    dao.insertVideo(video)
+                }
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /**
+     * Global Search: Query Central Registry (Vault 2) and merge into local Room DB.
+     */
+    suspend fun searchGlobalVaults(query: String) {
+        if (query.isBlank()) return
+        scope.launch {
+            try {
+                val response = NexoraNetworkClient.apiService.searchGlobalVideos(query)
+                if (response.isSuccessful && response.body() != null) {
+                    for (item in response.body()!!.videos) {
+                        val video = VideoEntity(
+                            id = item.id,
+                            localUri = item.localUri,
+                            title = item.title,
+                            description = item.description,
+                            category = item.category,
+                            tags = item.tags,
+                            timestamp = item.timestamp,
+                            duration = item.duration,
+                            viewCount = item.viewCount,
+                            chapterMarkersJson = item.chapterMarkersJson,
+                            thumbnailUri = item.thumbnailUri,
+                            authorChannelId = item.authorChannelId,
+                            collabChannelId = item.collabChannelId,
+                            isPremiere = item.isPremiere,
+                            premiereScheduledTimeMs = item.premiereScheduledTimeMs
+                        )
+                        dao.insertVideo(video)
+                    }
+                }
+            } catch (_: Exception) {
+                // Offline fallback relies on local Room database search
             }
         }
     }
@@ -252,7 +363,19 @@ class NexoraStreamRepository(private val context: Context) {
         isPremiere: Boolean = false,
         scheduledTimeMs: Long? = null,
         duration: Long = 60000L,
-        chapterMarkersJson: String = "[]"
+        chapterMarkersJson: String = "[]",
+        visibility: String = "Public",
+        isMadeForKids: Boolean = false,
+        isAgeRestricted: Boolean = false,
+        location: String = "",
+        shortsRemixing: String = "Allow video and audio remixing",
+        commentsModeration: String = "On (Strict)",
+        showLikesCount: Boolean = true,
+        containsPaidPromotion: Boolean = false,
+        videoLanguage: String = "English",
+        licenseType: String = "Standard Nexora License",
+        allowEmbedding: Boolean = true,
+        notifySubscribers: Boolean = true
     ): VideoEntity {
         val newVideo = VideoEntity(
             id = "vid_${UUID.randomUUID()}",
@@ -298,7 +421,19 @@ class NexoraStreamRepository(private val context: Context) {
                         thumbnailUri = thumbnailUri,
                         duration = duration,
                         authorChannelId = newVideo.authorChannelId,
-                        nexoraAuthToken = session.zentoraAuthToken
+                        nexoraAuthToken = session.zentoraAuthToken,
+                        visibility = visibility,
+                        isMadeForKids = isMadeForKids,
+                        isAgeRestricted = isAgeRestricted,
+                        location = location,
+                        shortsRemixing = shortsRemixing,
+                        commentsModeration = commentsModeration,
+                        showLikesCount = showLikesCount,
+                        containsPaidPromotion = containsPaidPromotion,
+                        videoLanguage = videoLanguage,
+                        licenseType = licenseType,
+                        allowEmbedding = allowEmbedding,
+                        notifySubscribers = notifySubscribers
                     )
                 )
             } catch (_: Exception) {
@@ -424,6 +559,25 @@ class NexoraStreamRepository(private val context: Context) {
             isLikedByMe = false
         )
         dao.insertComment(comment)
+
+        // NCP Global Sync: Dispatch comment to Vault 2 & Vault 5
+        scope.launch {
+            try {
+                val session = NexoraIdManager.getSession()
+                NexoraNetworkClient.apiService.postComment(
+                    PostCommentRequest(
+                        commentId = comment.commentId,
+                        videoId = videoId,
+                        authorName = authorName,
+                        commentText = sanitized,
+                        nexoraId = session.nexoraId,
+                        timestamp = comment.timestamp
+                    )
+                )
+            } catch (_: Exception) {
+                // Preserved in local Room DB Vault 1
+            }
+        }
         return isSafe
     }
 
@@ -516,6 +670,10 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun removeFromHistory(videoId: String) {
         dao.deleteHistoryById(videoId)
+    }
+
+    suspend fun upsertChannel(channel: ChannelEntity) {
+        dao.insertChannel(channel)
     }
 
     companion object {

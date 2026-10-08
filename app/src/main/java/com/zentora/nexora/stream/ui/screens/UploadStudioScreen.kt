@@ -1,19 +1,31 @@
 /* © 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora. */
 package com.zentora.nexora.stream.ui.screens
 
+import android.Manifest
+import android.content.ContentUris
+import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,11 +50,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.NexoraNetworkClient
-import com.zentora.nexora.stream.engine.NexoraStorageManager
 import com.zentora.nexora.stream.engine.Vault1StorageEngine
 import com.zentora.nexora.stream.ui.components.formatMsToTime
 import com.zentora.nexora.stream.ui.theme.*
@@ -60,11 +74,65 @@ enum class StudioPillMode(val label: String) {
     POST("Post")
 }
 
+data class LocalDeviceVideoItem(
+    val id: Long,
+    val uri: Uri,
+    val durationMs: Long,
+    val displayName: String
+)
+
+/**
+ * Loads real device videos from MediaStore (MediaStore.Video.Media.EXTERNAL_CONTENT_URI) via ContentResolver.
+ */
+fun queryDeviceVideos(context: Context): List<LocalDeviceVideoItem> {
+    val videos = mutableListOf<LocalDeviceVideoItem>()
+    val projection = arrayOf(
+        MediaStore.Video.Media._ID,
+        MediaStore.Video.Media.DURATION,
+        MediaStore.Video.Media.DISPLAY_NAME
+    )
+    val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
+
+    try {
+        val cursor = context.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            null,
+            null,
+            sortOrder
+        )
+
+        cursor?.use { c ->
+            val idColumn = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val durationColumn = c.getColumnIndex(MediaStore.Video.Media.DURATION)
+            val nameColumn = c.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+
+            while (c.moveToNext()) {
+                val id = c.getLong(idColumn)
+                val duration = if (durationColumn != -1) c.getLong(durationColumn) else 0L
+                val name = if (nameColumn != -1) c.getString(nameColumn) ?: "Video" else "Video"
+                val contentUri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+
+                videos.add(
+                    LocalDeviceVideoItem(
+                        id = id,
+                        uri = contentUri,
+                        durationMs = duration,
+                        displayName = name
+                    )
+                )
+            }
+        }
+    } catch (_: Exception) {
+    }
+    return videos
+}
+
 /**
  * 4-in-1 Unified Creator Studio matching exact YouTube screenshots:
- * - Screenshots 14-18-27 (Live), 14-18-35 (Gallery Grid), 14-18-39 (Short Camera),
- *   14-18-43 (Create Post), 14-18-51 / 14-18-56 (Short Trim & Edit),
- *   14-19-09 / 14-19-56 / 14-20-01 (Add Details Metadata), 14-19-54 (Edit Thumbnail).
+ * - TASK 1: Automatic In-App 3x3 Video Gallery Grid (Video Tab) via MediaStore.
+ * - Live Camera Viewfinder with CameraX in Shorts mode.
+ * - Add Details Metadata Suite with 10 full state-driven controls.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,7 +143,7 @@ fun UploadStudioScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val userSession = remember { NexoraIdManager.getSession() }
+    val userSession by NexoraIdManager.sessionFlow.collectAsState()
 
     var activePillMode by remember { mutableStateOf(StudioPillMode.VIDEO) }
 
@@ -94,64 +162,137 @@ fun UploadStudioScreen(
     var mediaDurationMs by remember { mutableLongStateOf(60000L) }
     var isShortMode by remember { mutableStateOf(false) }
 
-    // Metadata Fields (Screenshots 14-19-09, 14-20-01, 14-19-56)
+    // On-device MediaStore Video List
+    var deviceVideos by remember { mutableStateOf<List<LocalDeviceVideoItem>>(emptyList()) }
+    var isLoadingMedia by remember { mutableStateOf(false) }
+
+    // Read media permission launcher for Android 13+ (READ_MEDIA_VIDEO) or Android 12- (READ_EXTERNAL_STORAGE)
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        scope.launch(Dispatchers.IO) {
+            val list = queryDeviceVideos(context)
+            withContext(Dispatchers.Main) {
+                deviceVideos = list
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_VIDEO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+
+        if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) {
+            isLoadingMedia = true
+            scope.launch(Dispatchers.IO) {
+                val list = queryDeviceVideos(context)
+                withContext(Dispatchers.Main) {
+                    deviceVideos = list
+                    isLoadingMedia = false
+                }
+            }
+        } else {
+            mediaPermissionLauncher.launch(permission)
+        }
+    }
+
+    // Process selected video: copy to Vault 1 internal directory + 1.0s thumbnail extraction
+    val processAndIngestVideo: (Uri, Boolean) -> Unit = { sourceUri, isShort ->
+        selectedVideoUri = sourceUri
+        scope.launch(Dispatchers.IO) {
+            try {
+                // 1. Copy into Vault 1 internal directory (context.filesDir/nexora_vault_media/)
+                val savedVideoFile = Vault1StorageEngine.persistVideoToVault1(context, sourceUri, isShort)
+                persistedVideoFile = savedVideoFile
+
+                // 2. Auto-extract 1.0s video frame via MediaMetadataRetriever
+                val thumbFile = Vault1StorageEngine.extractAutomatic1SecThumbnail(context, savedVideoFile)
+                generatedThumbnailPath = thumbFile?.absolutePath
+
+                // 3. Extract duration
+                val duration = Vault1StorageEngine.extractDurationMs(savedVideoFile)
+                mediaDurationMs = duration
+
+                withContext(Dispatchers.Main) {
+                    isShortMode = isShort
+                    studioStage = if (isShort) 1 else 2
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Ingest failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    // ==================== FULL METADATA CONTROLS STATE ====================
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+
+    // 1. Visibility Selector
     var visibility by remember { mutableStateOf("Public") }
-    var audience by remember { mutableStateOf("No, it's not Made for Kids") }
+    var isInstantPremiere by remember { mutableStateOf(false) }
+    var scheduledDateTimeText by remember { mutableStateOf("") }
+    var showVisibilityModal by remember { mutableStateOf(false) }
+
+    // 2. Audience & COPPA Compliance
+    var isMadeForKids by remember { mutableStateOf(false) }
+    var isAgeRestricted by remember { mutableStateOf(false) }
+    var showAudienceModal by remember { mutableStateOf(false) }
+
+    // 3. Location Selector
     var location by remember { mutableStateOf("") }
-    var tags by remember { mutableStateOf("Zentora, 4K") }
+    var showLocationModal by remember { mutableStateOf(false) }
+
+    // 4. Add to Playlists
+    val selectedPlaylists = remember { mutableStateListOf<String>() }
+    var showPlaylistModal by remember { mutableStateOf(false) }
+
+    // 5. Shorts Remixing Permissions
+    var shortsRemixing by remember { mutableStateOf("Allow video and audio remixing") }
+    var showRemixingModal by remember { mutableStateOf(false) }
+
+    // 6. Comments & Moderation Settings
+    var commentsModeration by remember { mutableStateOf("On (Strict)") }
+    var showLikesCount by remember { mutableStateOf(true) }
+    var showCommentsModal by remember { mutableStateOf(false) }
+
+    // 7. Paid Promotion
+    var containsPaidPromotion by remember { mutableStateOf(false) }
+
+    // 8. Tags, Category & Language
+    var tagsInput by remember { mutableStateOf("Zentora, 4K, Nexora") }
+    var category by remember { mutableStateOf("Tech") }
+    var videoLanguage by remember { mutableStateOf("English") }
+    var showAttributesModal by remember { mutableStateOf(false) }
+
+    // 9. License & Distribution
+    var licenseType by remember { mutableStateOf("Standard Nexora License") }
+    var allowEmbedding by remember { mutableStateOf(true) }
+    var notifySubscribers by remember { mutableStateOf(true) }
+    var showLicenseModal by remember { mutableStateOf(false) }
+
     var isUploading by remember { mutableStateOf(false) }
     var uploadProgress by remember { mutableFloatStateOf(0f) }
     var showMoreDetails by remember { mutableStateOf(false) }
+    var showDescriptionModal by remember { mutableStateOf(false) }
 
-    // Live Mode State (Screenshot 14-18-27)
-    var liveTitle by remember { mutableStateOf("Skyline Pro gamer is live") }
-    var liveVisibility by remember { mutableStateOf("Unlisted • Not Made for Kids") }
+    // Live Mode State
+    var liveTitle by remember { mutableStateOf("Zentora Stream Live Broadcasting") }
+    var liveVisibility by remember { mutableStateOf("Public • Not Made for Kids") }
     var isLiveFlipped by remember { mutableStateOf(false) }
     var isLiveMuted by remember { mutableStateOf(false) }
     var isLiveVideoHidden by remember { mutableStateOf(false) }
 
-    // Post Mode State (Screenshot 14-18-43)
+    // Post Mode State
     var postText by remember { mutableStateOf("") }
     var postImageUri by remember { mutableStateOf<Uri?>(null) }
     var showPollEditor by remember { mutableStateOf(false) }
     var pollOption1 by remember { mutableStateOf("") }
     var pollOption2 by remember { mutableStateOf("") }
-
-    // System File Pickers
-    val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            selectedVideoUri = uri
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val uniqueId = UUID.randomUUID().toString().take(8)
-                    // Persist using NexoraStorageManager (Vault 1)
-                    val localPath = NexoraStorageManager.persistVideoLocally(context, uri, uniqueId)
-                    val localFile = File(localPath)
-                    persistedVideoFile = localFile
-
-                    // Auto-generate 1-second fallback thumbnail
-                    val thumbPath = NexoraStorageManager.generateAutoThumbnail(context, localPath, uniqueId)
-                    generatedThumbnailPath = thumbPath
-
-                    val duration = Vault1StorageEngine.extractDurationMs(localFile)
-                    mediaDurationMs = duration
-
-                    withContext(Dispatchers.Main) {
-                        isShortMode = activePillMode == StudioPillMode.SHORT
-                        studioStage = if (isShortMode) 1 else 2 // Go to Short edit or Add details
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Ingest failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
-        }
-    }
 
     val customThumbnailPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -162,7 +303,7 @@ fun UploadStudioScreen(
                     val thumbFile = Vault1StorageEngine.persistCustomThumbnailToVault1(context, uri)
                     customThumbnailPath = thumbFile.absolutePath
                     withContext(Dispatchers.Main) {
-                        studioStage = 2 // Return to Add details
+                        studioStage = 2
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
@@ -181,6 +322,15 @@ fun UploadStudioScreen(
         }
     }
 
+    // Short mode fallback gallery picker
+    val shortGalleryPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            processAndIngestVideo(uri, true)
+        }
+    }
+
     // ==================== SCREEN ROUTING BY STAGE ====================
     Box(
         modifier = Modifier
@@ -189,33 +339,27 @@ fun UploadStudioScreen(
     ) {
         when (studioStage) {
             0 -> {
-                // Initial creation screen for current pill mode
                 when (activePillMode) {
                     StudioPillMode.VIDEO -> {
-                        // Video Gallery Grid (Screenshot 14-18-35)
+                        // TASK 1: In-App 3x3 MediaStore Video Gallery Grid
                         VideoGalleryPickerView(
+                            videos = deviceVideos,
                             onClose = onClose,
-                            onPickFromStorage = { videoPickerLauncher.launch("video/*") },
-                            onSelectSample = { sampleUri, duration ->
-                                videoPickerLauncher.launch("video/*")
+                            onSelectVideo = { videoItem ->
+                                processAndIngestVideo(videoItem.uri, false)
                             }
                         )
                     }
 
                     StudioPillMode.SHORT -> {
-                        // Short Camera Viewfinder (Screenshot 14-18-39)
                         ShortCameraViewfinderView(
                             onClose = onClose,
-                            onAddGallery = { videoPickerLauncher.launch("video/*") },
-                            onRecord = {
-                                // Direct camera/media selection for Short
-                                videoPickerLauncher.launch("video/*")
-                            }
+                            onAddGallery = { shortGalleryPickerLauncher.launch("video/*") },
+                            onRecord = { shortGalleryPickerLauncher.launch("video/*") }
                         )
                     }
 
                     StudioPillMode.LIVE -> {
-                        // Live Broadcaster Preview (Screenshot 14-18-27)
                         LiveBroadcasterPreviewView(
                             title = liveTitle,
                             subtitle = liveVisibility,
@@ -228,13 +372,12 @@ fun UploadStudioScreen(
                             onHideVideo = { isLiveVideoHidden = !isLiveVideoHidden },
                             onClose = onClose,
                             onNext = {
-                                Toast.makeText(context, "Live stream ready on Vault 4 node", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Live stream initialized on Vault 4 node", Toast.LENGTH_SHORT).show()
                             }
                         )
                     }
 
                     StudioPillMode.POST -> {
-                        // Create Post Screen (Screenshot 14-18-43)
                         CreatePostView(
                             postText = postText,
                             onPostTextChange = { postText = it },
@@ -284,7 +427,6 @@ fun UploadStudioScreen(
             }
 
             1 -> {
-                // Short Trimmer & Edit Screen (Screenshots 14-18-51 & 14-18-56)
                 ShortTrimmerEditView(
                     onBack = { studioStage = 0 },
                     onNext = { studioStage = 2 }
@@ -292,19 +434,44 @@ fun UploadStudioScreen(
             }
 
             2 -> {
-                // Add Details Screen (Screenshots 14-19-09, 14-19-56, 14-20-01)
                 val activeThumb = customThumbnailPath ?: generatedThumbnailPath
                 AddDetailsMetadataView(
                     isShort = isShortMode,
                     thumbnailPath = activeThumb,
                     videoDurationMs = mediaDurationMs,
-                    channelName = if (userSession.username.isNotBlank()) userSession.username else "Skyline Pro gamer",
-                    handle = if (userSession.handle.isNotBlank()) userSession.handle else "@SkylineProgamer",
+                    channelName = userSession.username.ifBlank { "Zentora CLC" },
+                    handle = userSession.handle.ifBlank { "@zentora" },
                     avatarUri = userSession.avatarUri,
                     title = title,
                     onTitleChange = { title = it },
                     visibility = visibility,
-                    audience = audience,
+                    isInstantPremiere = isInstantPremiere,
+                    scheduledDateTimeText = scheduledDateTimeText,
+                    onOpenVisibility = { showVisibilityModal = true },
+                    isMadeForKids = isMadeForKids,
+                    isAgeRestricted = isAgeRestricted,
+                    onOpenAudience = { showAudienceModal = true },
+                    description = description,
+                    onOpenDescription = { showDescriptionModal = true },
+                    location = location,
+                    onOpenLocation = { showLocationModal = true },
+                    selectedPlaylists = selectedPlaylists,
+                    onOpenPlaylists = { showPlaylistModal = true },
+                    containsPaidPromotion = containsPaidPromotion,
+                    onTogglePaidPromotion = { containsPaidPromotion = !containsPaidPromotion },
+                    shortsRemixing = shortsRemixing,
+                    onOpenRemixing = { showRemixingModal = true },
+                    commentsModeration = commentsModeration,
+                    showLikesCount = showLikesCount,
+                    onOpenComments = { showCommentsModal = true },
+                    tags = tagsInput,
+                    category = category,
+                    videoLanguage = videoLanguage,
+                    onOpenAttributes = { showAttributesModal = true },
+                    licenseType = licenseType,
+                    allowEmbedding = allowEmbedding,
+                    notifySubscribers = notifySubscribers,
+                    onOpenLicense = { showLicenseModal = true },
                     showMore = showMoreDetails,
                     onToggleShowMore = { showMoreDetails = !showMoreDetails },
                     onEditThumbnail = { studioStage = 3 },
@@ -315,36 +482,60 @@ fun UploadStudioScreen(
                         val videoFile = persistedVideoFile
                         if (videoFile != null && videoFile.exists()) {
                             isUploading = true
-                            uploadProgress = 0.2f
+                            uploadProgress = 0.15f
 
                             scope.launch {
                                 val thumbFile = if (activeThumb != null) File(activeThumb) else null
 
-                                // 1. Real OkHttp upload to Vault 4
-                                uploadProgress = 0.5f
+                                // 1. Real OkHttp MultipartBody upload to Vault 4 Blobstore
+                                uploadProgress = 0.45f
                                 NexoraNetworkClient.uploadToVault4Blobstore(
                                     videoFile = videoFile,
                                     thumbnailFile = thumbFile,
                                     title = if (title.isNotBlank()) title.trim() else "My Video",
                                     description = description.trim(),
-                                    category = "Tech",
-                                    tags = tags.trim(),
+                                    category = category,
+                                    tags = tagsInput.trim(),
                                     authorChannelId = "ch_zentora_core",
-                                    isShort = isShortMode
+                                    isShort = isShortMode,
+                                    visibility = visibility,
+                                    isMadeForKids = isMadeForKids,
+                                    isAgeRestricted = isAgeRestricted,
+                                    location = location,
+                                    shortsRemixing = shortsRemixing,
+                                    commentsModeration = commentsModeration,
+                                    showLikesCount = showLikesCount,
+                                    containsPaidPromotion = containsPaidPromotion,
+                                    videoLanguage = videoLanguage,
+                                    licenseType = licenseType,
+                                    allowEmbedding = allowEmbedding,
+                                    notifySubscribers = notifySubscribers
                                 )
 
                                 uploadProgress = 0.85f
                                 delay(200)
 
-                                // 2. Insert into local Room DB (Vault 1)
+                                // 2. Room DB (Vault 1) + Vault 3 Registry + Vault 5 Grand Master Lock
                                 repository.uploadVideo(
                                     title = if (title.isNotBlank()) title.trim() else "My Video",
                                     description = description.trim(),
-                                    category = "Tech",
-                                    tags = tags.trim(),
+                                    category = category,
+                                    tags = tagsInput.trim(),
                                     localUri = videoFile.absolutePath,
                                     thumbnailUri = activeThumb ?: "",
-                                    duration = mediaDurationMs
+                                    duration = mediaDurationMs,
+                                    visibility = visibility,
+                                    isMadeForKids = isMadeForKids,
+                                    isAgeRestricted = isAgeRestricted,
+                                    location = location,
+                                    shortsRemixing = shortsRemixing,
+                                    commentsModeration = commentsModeration,
+                                    showLikesCount = showLikesCount,
+                                    containsPaidPromotion = containsPaidPromotion,
+                                    videoLanguage = videoLanguage,
+                                    licenseType = licenseType,
+                                    allowEmbedding = allowEmbedding,
+                                    notifySubscribers = notifySubscribers
                                 )
 
                                 uploadProgress = 1.0f
@@ -352,7 +543,7 @@ fun UploadStudioScreen(
                                 isUploading = false
 
                                 withContext(Dispatchers.Main) {
-                                    Toast.makeText(context, "Video uploaded successfully to Vault 1 & 4!", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Video uploaded successfully!", Toast.LENGTH_LONG).show()
                                     onUploadComplete()
                                 }
                             }
@@ -362,7 +553,6 @@ fun UploadStudioScreen(
             }
 
             3 -> {
-                // Edit Thumbnail Screen (Screenshots 14-19-54 & 14-19-23)
                 EditThumbnailView(
                     currentThumbnailPath = customThumbnailPath ?: generatedThumbnailPath,
                     onChangeThumbnail = { customThumbnailPickerLauncher.launch("image/*") },
@@ -372,23 +562,615 @@ fun UploadStudioScreen(
             }
         }
     }
+
+    // ==================== MODAL DIALOGS FOR UPLOAD CONTROLS ====================
+
+    // 1. Visibility Modal (Public, Unlisted, Private, Premiere, Schedule)
+    if (showVisibilityModal) {
+        val visibilityOptions = listOf(
+            Triple("Public", "Anyone can search for and view", Icons.Outlined.Public),
+            Triple("Unlisted", "Anyone with the link can view", Icons.Outlined.Link),
+            Triple("Private", "Only you and people you choose can view", Icons.Outlined.Lock)
+        )
+        AlertDialog(
+            onDismissRequest = { showVisibilityModal = false },
+            title = { Text("Set visibility", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    visibilityOptions.forEach { (opt, desc, icon) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { visibility = opt }
+                                .padding(vertical = 6.dp)
+                        ) {
+                            RadioButton(selected = visibility == opt, onClick = { visibility = opt })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(icon, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(opt, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Text(desc, fontSize = 11.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isInstantPremiere = !isInstantPremiere }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Checkbox(checked = isInstantPremiere, onCheckedChange = { isInstantPremiere = it })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Set as instant Premiere", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("When you set an instant Premiere, you and your viewers can watch it together at the same time.", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    Text("Schedule", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text("Select a date to make your video public", fontSize = 11.sp, color = Color.Gray)
+
+                    OutlinedTextField(
+                        value = scheduledDateTimeText,
+                        onValueChange = { scheduledDateTimeText = it },
+                        placeholder = { Text("e.g., Oct 15, 2026, 6:00 PM") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        leadingIcon = {
+                            Icon(Icons.Outlined.CalendarToday, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVisibilityModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 2. Audience & COPPA Modal
+    if (showAudienceModal) {
+        AlertDialog(
+            onDismissRequest = { showAudienceModal = false },
+            title = { Text("Audience & COPPA", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Is this video made for kids? (Required)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                    Text(
+                        "Regardless of your location, you're legally required to comply with COPPA and other laws. Features like comments and personalized ads won't be available on videos made for kids.",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        lineHeight = 15.sp
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isMadeForKids = true }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(selected = isMadeForKids, onClick = { isMadeForKids = true })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Yes, it's made for kids", fontSize = 14.sp)
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isMadeForKids = false }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(selected = !isMadeForKids, onClick = { isMadeForKids = false })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("No, it's not made for kids", fontSize = 14.sp)
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+                    Text("Age restriction (Advanced)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                    Text("Do you want to restrict your video to an adult audience?", fontSize = 11.sp, color = Color.Gray)
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isAgeRestricted = true }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(selected = isAgeRestricted, onClick = { isAgeRestricted = true })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Yes, restrict my video to viewers over 18", fontSize = 13.sp)
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isAgeRestricted = false }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(selected = !isAgeRestricted, onClick = { isAgeRestricted = false })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("No, don't restrict my video to viewers over 18 only", fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAudienceModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // Description Modal
+    if (showDescriptionModal) {
+        AlertDialog(
+            onDismissRequest = { showDescriptionModal = false },
+            title = { Text("Description", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    placeholder = { Text("Add description, links, and hashtags…") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                    maxLines = 10
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showDescriptionModal = false }) { Text("Save", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 3. Location Selector Modal (Search-as-you-type)
+    if (showLocationModal) {
+        val suggestedPlaces = remember {
+            listOf(
+                "San Francisco, California",
+                "New York, NY",
+                "Tokyo, Japan",
+                "London, United Kingdom",
+                "Dhaka, Bangladesh",
+                "Toronto, Canada",
+                "Sydney, Australia",
+                "Berlin, Germany",
+                "Seoul, South Korea",
+                "Singapore"
+            )
+        }
+        val filteredPlaces = remember(location) {
+            if (location.isBlank()) suggestedPlaces else suggestedPlaces.filter { it.contains(location, ignoreCase = true) }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showLocationModal = false },
+            title = { Text("Location", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = location,
+                        onValueChange = { location = it },
+                        placeholder = { Text("Search places or venues…") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        leadingIcon = {
+                            Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    filteredPlaces.forEach { place ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { location = place }
+                                .padding(vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Outlined.Place, contentDescription = null, tint = NexoraCyanGlow, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(place, fontSize = 13.sp, color = Color.White)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLocationModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 4. Add to Playlists Modal (with "Create new playlist" action)
+    if (showPlaylistModal) {
+        val availablePlaylists = remember {
+            mutableStateListOf("Uploads", "Favorites", "Watch Later", "Zentora 4K Master", "Dev Series")
+        }
+        var newPlaylistName by remember { mutableStateOf("") }
+        var showCreatePlaylistField by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showPlaylistModal = false },
+            title = { Text("Add to playlists", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    availablePlaylists.forEach { pl ->
+                        val isChecked = selectedPlaylists.contains(pl)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (isChecked) selectedPlaylists.remove(pl) else selectedPlaylists.add(pl)
+                                }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = isChecked,
+                                onCheckedChange = { check ->
+                                    if (check) selectedPlaylists.add(pl) else selectedPlaylists.remove(pl)
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(pl, fontSize = 14.sp)
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+                    if (showCreatePlaylistField) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = newPlaylistName,
+                                onValueChange = { newPlaylistName = it },
+                                placeholder = { Text("Playlist title") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    if (newPlaylistName.isNotBlank()) {
+                                        val name = newPlaylistName.trim()
+                                        if (!availablePlaylists.contains(name)) {
+                                            availablePlaylists.add(name)
+                                        }
+                                        selectedPlaylists.add(name)
+                                        newPlaylistName = ""
+                                        showCreatePlaylistField = false
+                                    }
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = NexoraRed)
+                            ) {
+                                Text("Add", fontSize = 12.sp)
+                            }
+                        }
+                    } else {
+                        TextButton(
+                            onClick = { showCreatePlaylistField = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Create new playlist", fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlaylistModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 5. Shorts Remixing Permissions Modal
+    if (showRemixingModal) {
+        val remixOptions = listOf(
+            Pair("Allow video and audio remixing", "Others can create Shorts using parts of this video"),
+            Pair("Allow only audio remixing", "Others can create Shorts using only the sound from this video"),
+            Pair("Don't allow remixing", "Others can't create Shorts using this video")
+        )
+        AlertDialog(
+            onDismissRequest = { showRemixingModal = false },
+            title = { Text("Shorts Remixing", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    remixOptions.forEach { (opt, desc) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { shortsRemixing = opt }
+                                .padding(vertical = 6.dp)
+                        ) {
+                            RadioButton(selected = shortsRemixing == opt, onClick = { shortsRemixing = opt })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(opt, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text(desc, fontSize = 11.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showRemixingModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 6. Comments & Moderation Settings Modal
+    if (showCommentsModal) {
+        val commentModerationOptions = listOf(
+            "Basic - Hold potentially inappropriate comments for review",
+            "Strict - Increase strictness",
+            "Hold all comments for review"
+        )
+        AlertDialog(
+            onDismissRequest = { showCommentsModal = false },
+            title = { Text("Comments & Ratings", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Comments", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+
+                    // Radio: ON
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (commentsModeration == "Off") {
+                                    commentsModeration = "Basic - Hold potentially inappropriate comments for review"
+                                }
+                            }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(
+                            selected = commentsModeration != "Off",
+                            onClick = {
+                                if (commentsModeration == "Off") {
+                                    commentsModeration = "Basic - Hold potentially inappropriate comments for review"
+                                }
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("On", fontWeight = FontWeight.Bold)
+                    }
+
+                    if (commentsModeration != "Off") {
+                        Column(modifier = Modifier.padding(start = 28.dp)) {
+                            commentModerationOptions.forEach { opt ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { commentsModeration = opt }
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    RadioButton(selected = commentsModeration == opt, onClick = { commentsModeration = opt })
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(opt, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // Radio: OFF
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { commentsModeration = "Off" }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        RadioButton(selected = commentsModeration == "Off", onClick = { commentsModeration = "Off" })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Off (Disable comments)", fontSize = 13.sp)
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showLikesCount = !showLikesCount }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Checkbox(checked = showLikesCount, onCheckedChange = { showLikesCount = it })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Show how many viewers like this video", fontSize = 13.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCommentsModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 8. Tags, Category & Language Modal (Full official categories)
+    if (showAttributesModal) {
+        val categories = listOf(
+            "Film & Animation",
+            "Autos & Vehicles",
+            "Music",
+            "Pets & Animals",
+            "Sports",
+            "Travel & Events",
+            "Gaming",
+            "People & Blogs",
+            "Comedy",
+            "Entertainment",
+            "News & Politics",
+            "Howto & Style",
+            "Education",
+            "Science & Technology"
+        )
+        val languages = listOf("English", "Spanish", "Japanese", "German", "Bengali", "French", "Hindi", "Mandarin")
+
+        AlertDialog(
+            onDismissRequest = { showAttributesModal = false },
+            title = { Text("Tags, Category & Language", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Tags (comma separated)", fontSize = 12.sp, color = Color.Gray)
+                        Text("${tagsInput.length}/500", fontSize = 11.sp, color = Color.Gray)
+                    }
+                    OutlinedTextField(
+                        value = tagsInput,
+                        onValueChange = {
+                            if (it.length <= 500) tagsInput = it
+                        },
+                        placeholder = { Text("zentora, stream, 4k, tech…") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text("Category", fontSize = 12.sp, color = Color.Gray, fontWeight = FontWeight.SemiBold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(categories) { cat ->
+                            FilterChip(
+                                selected = category == cat,
+                                onClick = { category = cat },
+                                label = { Text(cat, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+
+                    Text("Video Language", fontSize = 12.sp, color = Color.Gray, fontWeight = FontWeight.SemiBold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(languages) { lang ->
+                            FilterChip(
+                                selected = videoLanguage == lang,
+                                onClick = { videoLanguage = lang },
+                                label = { Text(lang, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAttributesModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
+
+    // 9. License & Distribution Modal
+    if (showLicenseModal) {
+        val licenses = listOf("Standard Nexora Stream License", "Creative Commons - Attribution")
+        AlertDialog(
+            onDismissRequest = { showLicenseModal = false },
+            title = { Text("Licensing & Distribution", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("License", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    licenses.forEach { l ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { licenseType = l }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(selected = licenseType == l, onClick = { licenseType = l })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(l, fontSize = 13.sp)
+                        }
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { allowEmbedding = !allowEmbedding }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Checkbox(checked = allowEmbedding, onCheckedChange = { allowEmbedding = it })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Allow embedding", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text("Enables or disables external player playback", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { notifySubscribers = !notifySubscribers }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Checkbox(checked = notifySubscribers, onCheckedChange = { notifySubscribers = it })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text("Publish to Subscriptions feed and notify subscribers", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text("Subscribers will get a notification when published", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLicenseModal = false }) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        )
+    }
 }
 
 // =================================================================================
-// 1. VIDEO GALLERY PICKER (Screenshot 14-18-35)
+// 1. AUTOMATIC IN-APP 3x3 VIDEO GALLERY GRID (TASK 1 - EXACT YOUTUBE STYLE)
 // =================================================================================
 @Composable
 fun VideoGalleryPickerView(
+    videos: List<LocalDeviceVideoItem>,
     onClose: () -> Unit,
-    onPickFromStorage: () -> Unit,
-    onSelectSample: (String, Long) -> Unit
+    onSelectVideo: (LocalDeviceVideoItem) -> Unit
 ) {
+    var showDropdownMenu by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(Color(0xFF0F0F0F))
             .padding(top = 16.dp)
     ) {
-        // Top Bar: (X) Close + "Upload from gallery" + "Videos v"
+        // Top Bar: (X) Close + "Upload from gallery" + "Videos ⌵"
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -405,108 +1187,111 @@ fun VideoGalleryPickerView(
                 color = Color.White
             )
             Spacer(modifier = Modifier.weight(1f))
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF222222),
-                modifier = Modifier.clickable { onPickFromStorage() }
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+
+            // Dropdown menu chip: "Videos ⌵"
+            Box {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF222222),
+                    modifier = Modifier.clickable { showDropdownMenu = true }
                 ) {
-                    Text("Videos", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Large Tap to pick file card
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = Color(0xFF1F1F1F),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .clickable { onPickFromStorage() }
-        ) {
-            Row(
-                modifier = Modifier.padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(NexoraRed),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.FileUpload, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Column {
-                    Text("Select video from your device", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 14.sp)
-                    Text("Instant persistent copy to Vault 1 internal directory", fontSize = 11.sp, color = Color.Gray)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // 3-Column Media Grid (matching screenshot 14-18-35)
-        val sampleGrid = remember {
-            listOf(
-                Pair("0:10", "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=300"),
-                Pair("0:20", "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"),
-                Pair("1:00", "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300"),
-                Pair("0:23", "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=300"),
-                Pair("0:24", "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=300"),
-                Pair("0:07", "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=300"),
-                Pair("1:45:12", "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=300"),
-                Pair("0:05", "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=300"),
-                Pair("2:10:24", "https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=300")
-            )
-        }
-
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(3),
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 2.dp),
-            contentPadding = PaddingValues(bottom = 100.dp)
-        ) {
-            items(sampleGrid) { (duration, url) ->
-                Box(
-                    modifier = Modifier
-                        .aspectRatio(1f)
-                        .padding(2.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xFF2A2A2A))
-                        .clickable { onPickFromStorage() }
-                ) {
-                    AsyncImage(
-                        model = url,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                    // Duration badge
-                    Surface(
-                        shape = RoundedCornerShape(3.dp),
-                        color = Color.Black.copy(alpha = 0.85f),
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(4.dp)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = duration,
-                            color = Color.White,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        Text("Videos", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = showDropdownMenu,
+                    onDismissRequest = { showDropdownMenu = false },
+                    modifier = Modifier.background(Color(0xFF1E1E1E))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Videos (${videos.size})", color = Color.White) },
+                        onClick = { showDropdownMenu = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Recent Media", color = Color.LightGray) },
+                        onClick = { showDropdownMenu = false }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // In-App Edge-to-Edge 3-column square grid
+        if (videos.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = 100.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Filled.VideoLibrary,
+                        contentDescription = null,
+                        tint = Color.DarkGray,
+                        modifier = Modifier.size(64.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "No videos detected on device storage",
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Grant media permissions to list your gallery videos",
+                        color = Color.DarkGray,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 1.dp),
+                contentPadding = PaddingValues(bottom = 100.dp)
+            ) {
+                items(videos, key = { it.id }) { videoItem ->
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .padding(1.5.dp)
+                            .background(Color(0xFF222222))
+                            .clickable { onSelectVideo(videoItem) }
+                    ) {
+                        AsyncImage(
+                            model = videoItem.uri,
+                            contentDescription = videoItem.displayName,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
                         )
+
+                        // Duration pill badge on bottom-right corner (e.g. "0:10", "1:45:12")
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = Color.Black.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(4.dp)
+                        ) {
+                            Text(
+                                text = formatMsToTime(videoItem.durationMs),
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -515,7 +1300,7 @@ fun VideoGalleryPickerView(
 }
 
 // =================================================================================
-// 2. SHORT CAMERA VIEWFINDER (Screenshot 14-18-39)
+// 2. SHORT CAMERA VIEWFINDER (Live Camera Preview with Permissions + Gallery Button)
 // =================================================================================
 @Composable
 fun ShortCameraViewfinderView(
@@ -523,17 +1308,76 @@ fun ShortCameraViewfinderView(
     onAddGallery: () -> Unit,
     onRecord: () -> Unit
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        hasCameraPermission = isGranted
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Viewfinder background (Dark gradient representing camera lens)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF1E1418))
-        )
+        if (hasCameraPermission) {
+            AndroidView(
+                factory = { ctx ->
+                    val previewView = PreviewView(ctx)
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                    cameraProviderFuture.addListener({
+                        val cameraProvider = cameraProviderFuture.get()
+                        val preview = Preview.Builder().build().also {
+                            it.setSurfaceProvider(previewView.surfaceProvider)
+                        }
+                        val cameraSelector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+                        try {
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
+                        } catch (_: Exception) {
+                        }
+                    }, ContextCompat.getMainExecutor(ctx))
+                    previewView
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF1E1418)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Filled.Videocam, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(54.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Camera viewfinder ready", color = Color.White, fontWeight = FontWeight.Bold)
+                    Button(
+                        onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                        colors = ButtonDefaults.buttonColors(containerColor = NexoraRed),
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Text("Grant Camera Permission")
+                    }
+                }
+            }
+        }
 
         // Top Controls: (X) Close, "Add sound" pill, Magic Wand
         Row(
@@ -553,7 +1397,6 @@ fun ShortCameraViewfinderView(
                 Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
             }
 
-            // "Add sound" Pill Button
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = Color.Black.copy(alpha = 0.6f),
@@ -569,7 +1412,6 @@ fun ShortCameraViewfinderView(
                 }
             }
 
-            // Magic Wand Sparkle Icon
             Box(
                 modifier = Modifier
                     .size(38.dp)
@@ -581,8 +1423,7 @@ fun ShortCameraViewfinderView(
             }
         }
 
-        // Right Vertical Tool Rail (matching screenshot 14-18-39):
-        // Flip, Timer, 15 s, Effects, 1x, Layout, More
+        // Right Vertical Tool Rail: Flip, Timer, 15 s, Effects, 1x, Layout, More
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = Color.Black.copy(alpha = 0.45f),
@@ -595,7 +1436,14 @@ fun ShortCameraViewfinderView(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip", tint = Color.White, modifier = Modifier.size(24.dp))
+                IconButton(
+                    onClick = {
+                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                    },
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip", tint = Color.White)
+                }
                 Icon(Icons.Outlined.Timer, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(24.dp))
                 Text("15 s", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Icon(Icons.Filled.AutoAwesome, contentDescription = "Effects", tint = Color.White, modifier = Modifier.size(24.dp))
@@ -605,7 +1453,7 @@ fun ShortCameraViewfinderView(
             }
         }
 
-        // Bottom Controls: "Add" gallery button (left), Red circle record button (center)
+        // Bottom Controls: Functional "Add from Gallery" button at bottom-left & Red Record Button
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -614,26 +1462,26 @@ fun ShortCameraViewfinderView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // "Add" gallery thumbnail
+            // "Add from Gallery" Button
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.clickable { onAddGallery() }
             ) {
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(46.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color.DarkGray)
                         .border(1.5.dp, Color.White, RoundedCornerShape(8.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.PhotoLibrary, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                    Icon(Icons.Filled.PhotoLibrary, contentDescription = "Add from Gallery", tint = Color.White, modifier = Modifier.size(24.dp))
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("Add", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
 
-            // Big Red Circle Record Button (with white outer ring)
+            // Big Red Circle Record Button
             Box(
                 modifier = Modifier
                     .size(76.dp)
@@ -645,14 +1493,13 @@ fun ShortCameraViewfinderView(
                     .clickable { onRecord() }
             )
 
-            // Empty spacer for balance
-            Spacer(modifier = Modifier.size(44.dp))
+            Spacer(modifier = Modifier.size(46.dp))
         }
     }
 }
 
 // =================================================================================
-// 3. SHORT TRIMMER & EDIT VIEW (Screenshots 14-18-51 & 14-18-56)
+// 3. SHORT TRIMMER & EDIT VIEW
 // =================================================================================
 @Composable
 fun ShortTrimmerEditView(
@@ -664,7 +1511,6 @@ fun ShortTrimmerEditView(
             .fillMaxSize()
             .background(Color(0xFF0A0F1E))
     ) {
-        // Top Bar: Back arrow, "Add sound", volume/mute icon
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -707,7 +1553,6 @@ fun ShortTrimmerEditView(
             }
         }
 
-        // Center visual preview placeholder
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -721,8 +1566,6 @@ fun ShortTrimmerEditView(
             }
         }
 
-        // Right Vertical Tool Rail (matching screenshot 14-18-56):
-        // Text (Aa), Effects, Filters, Stickers, Captions, More
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = Color.Black.copy(alpha = 0.45f),
@@ -744,14 +1587,12 @@ fun ShortTrimmerEditView(
             }
         }
 
-        // Bottom Controls: Video trimming bar (10.0s) & Next button (screenshot 14-18-51)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 24.dp)
         ) {
-            // Trimmer Strip
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color.DarkGray,
@@ -785,7 +1626,6 @@ fun ShortTrimmerEditView(
             ) {
                 Text("Drag to adjust video", color = Color.Gray, fontSize = 12.sp)
 
-                // White pill "Next" button
                 Button(
                     onClick = onNext,
                     shape = RoundedCornerShape(20.dp),
@@ -808,7 +1648,7 @@ fun ShortToolItem(label: String, icon: ImageVector) {
 }
 
 // =================================================================================
-// 4. LIVE BROADCASTER PREVIEW (Screenshot 14-18-27)
+// 4. LIVE BROADCASTER PREVIEW
 // =================================================================================
 @Composable
 fun LiveBroadcasterPreviewView(
@@ -829,7 +1669,6 @@ fun LiveBroadcasterPreviewView(
             .fillMaxSize()
             .background(Color(0xFF160D12))
     ) {
-        // Top Bar: (X) Close, Calendar, Share
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -855,7 +1694,7 @@ fun LiveBroadcasterPreviewView(
                         .clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.5f))
                 ) {
-                    Icon(Icons.Outlined.CalendarToday, contentDescription = null, tint = Color.White)
+                    Icon(Icons.Filled.CalendarMonth, contentDescription = null, tint = Color.White)
                 }
                 IconButton(
                     onClick = {},
@@ -864,13 +1703,11 @@ fun LiveBroadcasterPreviewView(
                         .clip(CircleShape)
                         .background(Color.Black.copy(alpha = 0.5f))
                 ) {
-                    Icon(Icons.Outlined.Share, contentDescription = null, tint = Color.White)
+                    Icon(Icons.Filled.Share, contentDescription = null, tint = Color.White)
                 }
             }
         }
 
-        // Right Vertical Tool Rail (matching screenshot 14-18-27):
-        // Flip, Mute, Hide live video, Orientation, More
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = Color.Black.copy(alpha = 0.45f),
@@ -879,109 +1716,74 @@ fun LiveBroadcasterPreviewView(
                 .padding(end = 12.dp)
         ) {
             Column(
-                modifier = Modifier.padding(vertical = 14.dp, horizontal = 8.dp),
+                modifier = Modifier.padding(vertical = 12.dp, horizontal = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(18.dp)
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onFlip() }) {
-                    Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip", tint = Color.White, modifier = Modifier.size(24.dp))
-                    Text("Flip", color = Color.White, fontSize = 10.sp)
+                IconButton(onClick = onFlip, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip", tint = Color.White)
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onMute() }) {
-                    Icon(if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic, contentDescription = "Mute", tint = Color.White, modifier = Modifier.size(24.dp))
-                    Text("Mute", color = Color.White, fontSize = 10.sp)
+                IconButton(onClick = onMute, modifier = Modifier.size(24.dp)) {
+                    Icon(if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic, contentDescription = "Mic", tint = Color.White)
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onHideVideo() }) {
-                    Icon(if (isVideoHidden) Icons.Filled.VideocamOff else Icons.Filled.Videocam, contentDescription = "Hide video", tint = Color.White, modifier = Modifier.size(24.dp))
-                    Text("Hide live video", color = Color.White, fontSize = 9.sp)
+                IconButton(onClick = onHideVideo, modifier = Modifier.size(24.dp)) {
+                    Icon(if (isVideoHidden) Icons.Filled.VideocamOff else Icons.Filled.Videocam, contentDescription = "Video", tint = Color.White)
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Outlined.StayCurrentPortrait, contentDescription = "Orientation", tint = Color.White, modifier = Modifier.size(24.dp))
-                    Text("Orientation", color = Color.White, fontSize = 9.sp)
-                }
-                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "More", tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.Filled.AutoAwesome, contentDescription = "Filters", tint = Color.White, modifier = Modifier.size(24.dp))
+                Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(24.dp))
             }
         }
 
-        // Bottom Details and Action Buttons (matching screenshot 14-18-27)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 90.dp)
+                .padding(horizontal = 16.dp, vertical = 24.dp)
         ) {
-            // Identity row with cyan border avatar and edit pencil
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color.Black.copy(alpha = 0.7f),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .border(2.dp, NexoraZentoraBlue, CircleShape)
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     AsyncImage(
                         model = avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150" },
                         contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(CircleShape),
                         contentScale = ContentScale.Crop
                     )
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Text(subtitle, color = Color.Gray, fontSize = 12.sp)
-                }
-
-                IconButton(
-                    onClick = {},
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color.DarkGray)
-                ) {
-                    Icon(Icons.Filled.Edit, contentDescription = "Edit title", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(title, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 14.sp)
+                        Text(subtitle, color = Color.Gray, fontSize = 12.sp)
+                    }
+                    Icon(Icons.Filled.Edit, contentDescription = "Edit", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // White rounded "Next" button
             Button(
                 onClick = onNext,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
                 shape = RoundedCornerShape(24.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White)
-            ) {
-                Text("Next", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Dark rounded "Practice mode" button
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = Color(0xFF262626),
+                colors = ButtonDefaults.buttonColors(containerColor = NexoraRed),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .clickable { onNext() }
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text("Practice mode", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                }
+                Text("Go Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
             }
         }
     }
 }
 
 // =================================================================================
-// 5. CREATE POST VIEW (Screenshot 14-18-43)
+// 5. CREATE POST VIEW
 // =================================================================================
 @Composable
 fun CreatePostView(
@@ -1002,167 +1804,121 @@ fun CreatePostView(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 16.dp)
+            .padding(16.dp)
     ) {
-        // Top Bar: (X) Close, "Create post", "Post" button
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("Create post", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), color = Color.White)
+            IconButton(onClick = onClose) {
+                Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
             }
-
+            Text("Create post", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
             Button(
                 onClick = onPublishPost,
+                enabled = postText.isNotBlank(),
                 shape = RoundedCornerShape(20.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (postText.isNotBlank()) Color.White else Color(0xFF333333)
-                ),
-                enabled = postText.isNotBlank()
+                colors = ButtonDefaults.buttonColors(containerColor = NexoraRed)
             ) {
-                Text("Post", color = if (postText.isNotBlank()) Color.Black else Color.Gray, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Identity row (Avatar, Channel name, "🌐 Public" pill, 3-dots)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color.DarkGray)
-            ) {
-                Icon(Icons.Filled.Person, contentDescription = null, tint = Color.White, modifier = Modifier.fillMaxSize())
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column {
-                Text("Skyline Pro gamer", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(modifier = Modifier.height(2.dp))
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = Color(0xFF262626)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Outlined.Public, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(13.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Public", color = Color.LightGray, fontSize = 11.sp)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            IconButton(onClick = {}) {
-                Icon(Icons.Filled.MoreVert, contentDescription = null, tint = Color.White)
+                Text("Post", color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Text area: "Post an update to your fans"
         OutlinedTextField(
             value = postText,
             onValueChange = onPostTextChange,
-            placeholder = { Text("Post an update to your fans", color = Color.Gray, fontSize = 16.sp) },
+            placeholder = { Text("Post an update to your fans…", color = Color.Gray) },
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 16.dp),
+                .weight(1f),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = Color.Transparent,
-                unfocusedBorderColor = Color.Transparent,
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White
+                unfocusedBorderColor = Color.Transparent
             )
         )
 
-        // Poll options if active
-        if (showPoll) {
-            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                OutlinedTextField(
-                    value = pollOption1,
-                    onValueChange = onPoll1Change,
-                    placeholder = { Text("Add option 1") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = pollOption2,
-                    onValueChange = onPoll2Change,
-                    placeholder = { Text("Add option 2") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                )
-            }
-        }
-
-        // Image attachment preview if selected
         if (postImageUri != null) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(160.dp)
-                    .padding(horizontal = 16.dp)
+                    .height(180.dp)
                     .clip(RoundedCornerShape(8.dp))
+                    .background(Color.DarkGray)
             ) {
-                AsyncImage(model = postImageUri, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(
+                    model = postImageUri,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
                 IconButton(
                     onClick = onRemoveImage,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black)
+                        .padding(8.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
                 ) {
-                    Icon(Icons.Filled.Close, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Color.White)
                 }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        if (showPoll) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = pollOption1,
+                    onValueChange = onPoll1Change,
+                    placeholder = { Text("Poll Option 1") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = pollOption2,
+                    onValueChange = onPoll2Change,
+                    placeholder = { Text("Poll Option 2") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
             }
         }
 
-        // Bottom Action Bar: Poll icon, Image icon, Quiz icon (screenshot 14-18-43)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 90.dp),
-            horizontalArrangement = Arrangement.spacedBy(24.dp)
+                .padding(vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            IconButton(onClick = onTogglePoll) {
-                Icon(Icons.AutoMirrored.Filled.Segment, contentDescription = "Poll", tint = if (showPoll) NexoraRed else Color.White, modifier = Modifier.size(26.dp))
+            IconButton(
+                onClick = onPickImage,
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(Color(0xFF222222), CircleShape)
+            ) {
+                Icon(Icons.Filled.Image, contentDescription = "Image", tint = Color.White)
             }
-            IconButton(onClick = onPickImage) {
-                Icon(Icons.Outlined.Image, contentDescription = "Image", tint = Color.White, modifier = Modifier.size(26.dp))
-            }
-            IconButton(onClick = onTogglePoll) {
-                Icon(Icons.Outlined.CheckBox, contentDescription = "Quiz", tint = Color.White, modifier = Modifier.size(26.dp))
+            IconButton(
+                onClick = onTogglePoll,
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(Color(0xFF222222), CircleShape)
+            ) {
+                Icon(Icons.Filled.Poll, contentDescription = "Poll", tint = Color.White)
             }
         }
     }
 }
 
 // =================================================================================
-// 6. ADD DETAILS METADATA VIEW (Screenshots 14-19-09, 14-19-56, 14-20-01)
+// 6. ADD DETAILS METADATA SUITE (COMPLETE YOUTUBE-STYLE CONTROLS)
 // =================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1176,7 +1932,33 @@ fun AddDetailsMetadataView(
     title: String,
     onTitleChange: (String) -> Unit,
     visibility: String,
-    audience: String,
+    isInstantPremiere: Boolean,
+    scheduledDateTimeText: String,
+    onOpenVisibility: () -> Unit,
+    isMadeForKids: Boolean,
+    isAgeRestricted: Boolean,
+    onOpenAudience: () -> Unit,
+    description: String,
+    onOpenDescription: () -> Unit,
+    location: String,
+    onOpenLocation: () -> Unit,
+    selectedPlaylists: List<String>,
+    onOpenPlaylists: () -> Unit,
+    containsPaidPromotion: Boolean,
+    onTogglePaidPromotion: () -> Unit,
+    shortsRemixing: String,
+    onOpenRemixing: () -> Unit,
+    commentsModeration: String,
+    showLikesCount: Boolean,
+    onOpenComments: () -> Unit,
+    tags: String,
+    category: String,
+    videoLanguage: String,
+    onOpenAttributes: () -> Unit,
+    licenseType: String,
+    allowEmbedding: Boolean,
+    notifySubscribers: Boolean,
+    onOpenLicense: () -> Unit,
     showMore: Boolean,
     onToggleShowMore: () -> Unit,
     onEditThumbnail: () -> Unit,
@@ -1198,7 +1980,6 @@ fun AddDetailsMetadataView(
             )
         },
         bottomBar = {
-            // Full-width rounded white Upload Button (Screenshots 14-19-09 & 14-20-01)
             Surface(
                 color = MaterialTheme.colorScheme.background,
                 modifier = Modifier.fillMaxWidth()
@@ -1236,7 +2017,6 @@ fun AddDetailsMetadataView(
                     .padding(16.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                // Thumbnail Box with Pencil Icon on top-left overlay
                 Box(
                     modifier = Modifier
                         .width(if (isShort) 80.dp else 120.dp)
@@ -1254,7 +2034,6 @@ fun AddDetailsMetadataView(
                         )
                     }
 
-                    // Edit Pencil overlay on top left
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -1267,7 +2046,6 @@ fun AddDetailsMetadataView(
                         Icon(Icons.Filled.Edit, contentDescription = "Edit Thumbnail", tint = Color.White, modifier = Modifier.size(15.dp))
                     }
 
-                    // Duration badge on bottom right
                     Surface(
                         shape = RoundedCornerShape(2.dp),
                         color = Color.Black.copy(alpha = 0.85f),
@@ -1287,7 +2065,6 @@ fun AddDetailsMetadataView(
 
                 Spacer(modifier = Modifier.width(16.dp))
 
-                // Title / Caption Input Field
                 OutlinedTextField(
                     value = title,
                     onValueChange = onTitleChange,
@@ -1339,30 +2116,98 @@ fun AddDetailsMetadataView(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
 
-            // List of metadata settings with right chevrons (matching screenshots 14-20-01 & 14-19-56):
-            // 🌐 Visibility: Public >
-            DetailSettingsRow(Icons.Outlined.Public, "Visibility", visibility, onClick = {})
-            // 👥 Audience: No, it's not Made for Kids >
-            DetailSettingsRow(Icons.Outlined.Group, "Audience", audience, onClick = {})
-            // ≡ Add description >
-            DetailSettingsRow(Icons.Outlined.Subject, "Add description", null, onClick = {})
-            // 📍 Location >
-            DetailSettingsRow(Icons.Outlined.Place, "Location", null, onClick = {})
-            // ▶ Related video >
-            DetailSettingsRow(Icons.Outlined.PlayCircle, "Related video", null, onClick = {})
-            // ☰+ Add to playlists +
-            DetailSettingsRow(Icons.Outlined.PlaylistAdd, "Add to playlists", null, isAdd = true, onClick = {})
-            // 💲 Paid promotion and brands >
-            DetailSettingsRow(Icons.Outlined.Paid, "Paid promotion and brands", null, onClick = {})
+            // 1. Visibility Selector
+            val visibilitySubtitle = buildString {
+                append(visibility)
+                if (isInstantPremiere) append(" • Instant Premiere")
+                if (scheduledDateTimeText.isNotBlank()) append(" • Scheduled: $scheduledDateTimeText")
+            }
+            DetailSettingsRow(Icons.Outlined.Public, "Visibility", visibilitySubtitle, onClick = onOpenVisibility)
 
-            if (showMore) {
-                // 💬 Community: Collaborations, Comments, and Remixing >
-                DetailSettingsRow(Icons.Outlined.ChatBubbleOutline, "Community", "Collaborations, Comments, and Remixing", onClick = {})
-                // 📑 Attributes: AI use, Tags >
-                DetailSettingsRow(Icons.Outlined.Article, "Attributes", "AI use, Tags", onClick = {})
+            // 2. Audience & COPPA Compliance
+            val audienceSubtitle = if (isMadeForKids) "Yes, it's Made for Kids" else "No, it's not Made for Kids" + if (isAgeRestricted) " • 18+ Restricted" else ""
+            DetailSettingsRow(Icons.Outlined.Group, "Audience", audienceSubtitle, onClick = onOpenAudience)
+
+            // Description Row
+            DetailSettingsRow(
+                Icons.Outlined.Subject,
+                "Description",
+                if (description.isNotBlank()) description.take(35) + "…" else "Add description",
+                onClick = onOpenDescription
+            )
+
+            // 3. Location Selector
+            DetailSettingsRow(
+                Icons.Outlined.Place,
+                "Location",
+                if (location.isNotBlank()) location else "Add location",
+                onClick = onOpenLocation
+            )
+
+            // 4. Add to Playlists
+            val playlistsSubtitle = if (selectedPlaylists.isNotEmpty()) selectedPlaylists.joinToString(", ") else null
+            DetailSettingsRow(
+                Icons.Outlined.PlaylistAdd,
+                "Add to playlists",
+                playlistsSubtitle,
+                isAdd = selectedPlaylists.isEmpty(),
+                onClick = onOpenPlaylists
+            )
+
+            // 5. Shorts Remixing Permissions
+            DetailSettingsRow(
+                Icons.Outlined.GraphicEq,
+                "Shorts remixing",
+                shortsRemixing,
+                onClick = onOpenRemixing
+            )
+
+            // 6. Comments & Moderation Settings
+            val commentsSubtitle = "$commentsModeration • ${if (showLikesCount) "Likes visible" else "Likes hidden"}"
+            DetailSettingsRow(
+                Icons.Outlined.ChatBubbleOutline,
+                "Comments",
+                commentsSubtitle,
+                onClick = onOpenComments
+            )
+
+            // 7. Paid Promotion Checkbox Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onTogglePaidPromotion() }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Outlined.Paid, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(22.dp))
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Paid promotion", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                    Text("My video contains paid promotion (sponsorship/endorsement)", fontSize = 12.sp, color = Color.Gray)
+                }
+                Checkbox(checked = containsPaidPromotion, onCheckedChange = { onTogglePaidPromotion() })
             }
 
-            // "Show more v" / "Show less ^" toggle button
+            if (showMore) {
+                // 8. Tags, Category & Language
+                DetailSettingsRow(
+                    Icons.Outlined.Article,
+                    "Category, Tags & Language",
+                    "$category • $videoLanguage • $tags",
+                    onClick = onOpenAttributes
+                )
+
+                // 9. License & Distribution
+                val licenseSubtitle = "$licenseType • ${if (allowEmbedding) "Embedding on" else "Embedding off"}"
+                DetailSettingsRow(
+                    Icons.Outlined.Gavel,
+                    "License and distribution",
+                    licenseSubtitle,
+                    onClick = onOpenLicense
+                )
+            }
+
+            // "Show more" / "Show less" toggle button
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = Color(0xFF222222),
@@ -1382,7 +2227,7 @@ fun AddDetailsMetadataView(
                 }
             }
 
-            // COPPA Compliance Legal Notice (matching screenshot 14-19-56)
+            // COPPA Compliance Legal Notice
             Text(
                 text = "Regardless of your location, you're legally required to comply with the US Children's Online Privacy Protection Act (COPPA) and/or other laws. You're required to tell us whether your videos are Made for Kids.",
                 fontSize = 11.sp,
@@ -1392,13 +2237,21 @@ fun AddDetailsMetadataView(
             )
 
             if (isUploading) {
-                LinearProgressIndicator(
-                    progress = { uploadProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    color = NexoraRed
-                )
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Uploading video…", fontSize = 12.sp, color = Color.White)
+                        Text("${(uploadProgress * 100).toInt()}%", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = NexoraRed)
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { uploadProgress },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = NexoraRed
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(30.dp))
@@ -1439,7 +2292,7 @@ fun DetailSettingsRow(
 }
 
 // =================================================================================
-// 7. EDIT THUMBNAIL VIEW (Screenshots 14-19-54 & 14-19-23)
+// 7. EDIT THUMBNAIL VIEW
 // =================================================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1479,7 +2332,6 @@ fun EditThumbnailView(
                 .padding(16.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // 16:9 Thumbnail preview box
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1500,7 +2352,6 @@ fun EditThumbnailView(
                 }
             }
 
-            // "Change" Button Card with + image icon (matching screenshot 14-19-54)
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = Color.Black,

@@ -17,6 +17,7 @@ import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
+import retrofit2.http.Query
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -58,7 +59,19 @@ data class PublishVideoRequest(
     val thumbnailUri: String,
     val duration: Long,
     val authorChannelId: String,
-    val nexoraAuthToken: String
+    val nexoraAuthToken: String,
+    val visibility: String = "Public",
+    val isMadeForKids: Boolean = false,
+    val isAgeRestricted: Boolean = false,
+    val location: String = "",
+    val shortsRemixing: String = "Allow video and audio remixing",
+    val commentsModeration: String = "On (Strict)",
+    val showLikesCount: Boolean = true,
+    val containsPaidPromotion: Boolean = false,
+    val videoLanguage: String = "English",
+    val licenseType: String = "Standard Nexora License",
+    val allowEmbedding: Boolean = true,
+    val notifySubscribers: Boolean = true
 )
 
 data class PublishVideoResponse(
@@ -87,6 +100,65 @@ data class InteractResponse(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class NetworkCommentItem(
+    val commentId: String,
+    val videoId: String,
+    val authorName: String,
+    val commentText: String,
+    val timestamp: Long,
+    val likeCount: Long = 0L
+)
+
+data class PostCommentRequest(
+    val commentId: String,
+    val videoId: String,
+    val authorName: String,
+    val commentText: String,
+    val nexoraId: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class PostCommentResponse(
+    val status: String = "SUCCESS",
+    val commentId: String,
+    val vault2Acknowledged: Boolean = true,
+    val vault5Synced: Boolean = true,
+    val message: String = "Comment synchronized to Central Vault 2 & Vault 5"
+)
+
+data class CommentsSyncResponse(
+    val status: String = "SUCCESS",
+    val videoId: String,
+    val comments: List<NetworkCommentItem> = emptyList()
+)
+
+data class RegisterUserRequest(
+    val nexoraId: String,
+    val username: String,
+    val email: String,
+    val handle: String,
+    val avatarUri: String,
+    val zentoraAuthToken: String
+)
+
+data class RegisterUserResponse(
+    val status: String = "SUCCESS",
+    val nexoraId: String,
+    val vault2Registered: Boolean = true,
+    val message: String = "User registered in Central Vault 2 Sharded Registry"
+)
+
+data class UserProfileSyncResponse(
+    val status: String = "SUCCESS",
+    val nexoraId: String,
+    val username: String = "",
+    val handle: String = "",
+    val avatarUri: String = "",
+    val subscriberCount: Long = 0L,
+    val creatorLevel: String = "Rising Creator",
+    val uploadedVideos: List<NetworkVideoItem> = emptyList()
+)
+
 data class VaultAuditResponse(
     val vaultsSynced: Boolean = true,
     val vault1LocalCount: Int = 0,
@@ -110,6 +182,12 @@ interface NexoraApiService {
     suspend fun getFeed(): retrofit2.Response<FeedResponse>
 
     /**
+     * Search global registry for videos by query across titles, tags, or descriptions
+     */
+    @GET("api/v1/videos/search")
+    suspend fun searchGlobalVideos(@Query("q") query: String): retrofit2.Response<FeedResponse>
+
+    /**
      * 2. POST /api/v1/videos/publish
      * Registers uploaded video to Vault 3 and locks into Vault 5 (Grand Master).
      */
@@ -122,6 +200,30 @@ interface NexoraApiService {
      */
     @POST("api/v1/videos/interact")
     suspend fun sendInteraction(@Body request: InteractRequest): retrofit2.Response<InteractResponse>
+
+    /**
+     * Post comment to Vault 2 and Vault 5
+     */
+    @POST("api/v1/comments/post")
+    suspend fun postComment(@Body request: PostCommentRequest): retrofit2.Response<PostCommentResponse>
+
+    /**
+     * Get global comments for video from Vault 2
+     */
+    @GET("api/v1/comments")
+    suspend fun getCommentsForVideo(@Query("videoId") videoId: String): retrofit2.Response<CommentsSyncResponse>
+
+    /**
+     * Register user session into Central Vault 2
+     */
+    @POST("api/v1/user/register")
+    suspend fun registerUser(@Body request: RegisterUserRequest): retrofit2.Response<RegisterUserResponse>
+
+    /**
+     * Account Restoration: restore user profile and uploaded videos from Central Vaults
+     */
+    @GET("api/v1/user/restore")
+    suspend fun restoreUserProfile(@Query("nexoraId") nexoraId: String): retrofit2.Response<UserProfileSyncResponse>
 
     /**
      * 4. GET /api/v1/vaults/audit
@@ -187,6 +289,7 @@ object NexoraNetworkClient {
     /**
      * Vault 4 (Zentora Blobstore Vault): Persistent binary streaming node.
      * Executes real OkHttp MultipartBody upload directly to the Master Server Vault 4 endpoint.
+     * Accessible worldwide via public CDN / direct streaming URLs.
      */
     suspend fun uploadToVault4Blobstore(
         videoFile: File,
@@ -196,7 +299,19 @@ object NexoraNetworkClient {
         category: String,
         tags: String,
         authorChannelId: String,
-        isShort: Boolean
+        isShort: Boolean,
+        visibility: String = "Public",
+        isMadeForKids: Boolean = false,
+        isAgeRestricted: Boolean = false,
+        location: String = "",
+        shortsRemixing: String = "Allow video and audio remixing",
+        commentsModeration: String = "On (Strict)",
+        showLikesCount: Boolean = true,
+        containsPaidPromotion: Boolean = false,
+        videoLanguage: String = "English",
+        licenseType: String = "Standard Nexora License",
+        allowEmbedding: Boolean = true,
+        notifySubscribers: Boolean = true
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val session = NexoraIdManager.getSession()
@@ -212,6 +327,18 @@ object NexoraNetworkClient {
                 .addFormDataPart("authorChannelId", authorChannelId)
                 .addFormDataPart("isShort", isShort.toString())
                 .addFormDataPart("nexoraId", session.nexoraId)
+                .addFormDataPart("visibility", visibility)
+                .addFormDataPart("isMadeForKids", isMadeForKids.toString())
+                .addFormDataPart("isAgeRestricted", isAgeRestricted.toString())
+                .addFormDataPart("location", location)
+                .addFormDataPart("shortsRemixing", shortsRemixing)
+                .addFormDataPart("commentsModeration", commentsModeration)
+                .addFormDataPart("showLikesCount", showLikesCount.toString())
+                .addFormDataPart("containsPaidPromotion", containsPaidPromotion.toString())
+                .addFormDataPart("videoLanguage", videoLanguage)
+                .addFormDataPart("licenseType", licenseType)
+                .addFormDataPart("allowEmbedding", allowEmbedding.toString())
+                .addFormDataPart("notifySubscribers", notifySubscribers.toString())
                 .addFormDataPart(
                     "mediaFile",
                     videoFile.name,

@@ -4,6 +4,9 @@ package com.zentora.nexora.stream.engine
 import android.content.Context
 import android.util.Base64
 import com.zentora.nexora.stream.data.database.entities.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -21,7 +24,6 @@ object NexoraSmartRank {
         if (videos.isEmpty()) return emptyList()
 
         // 1. Calculate category affinity from watch history
-        val watchedVideoIds = history.map { it.videoId }.toSet()
         val categoryCounts = mutableMapOf<String, Int>()
         for (h in history) {
             val v = videos.find { it.id == h.videoId }
@@ -177,7 +179,6 @@ object NexoraP2PShare {
     data class P2PDevice(val id: String, val name: String, val status: String)
 
     fun getNearbyPeers(): List<P2PDevice> {
-        // Zero dummy devices: Returns strictly real discovered peers
         return emptyList()
     }
 
@@ -189,7 +190,7 @@ object NexoraP2PShare {
 
 /**
  * Nexora ID System:
- * Internal single sign-on engine managing authenticated user sessions without Google/Facebook dependencies.
+ * Manages authenticated user sessions, Google ID linking, and reactive session state.
  */
 data class NexoraSession(
     val nexoraId: String,
@@ -200,31 +201,179 @@ data class NexoraSession(
     val isCreatorMode: Boolean = true,
     val zentoraAuthToken: String,
     val creatorLevel: String = "Rising Creator",
-    val hasZentoraBadge: Boolean = true
+    val hasZentoraBadge: Boolean = true,
+    val isSignedInWithGoogle: Boolean = false,
+    val isGuest: Boolean = false
 )
 
 object NexoraIdManager {
 
-    private var activeSession = NexoraSession(
-        nexoraId = "NX-${UUID.randomUUID().toString().take(8).uppercase()}",
-        username = "",
-        email = "",
-        handle = "",
-        avatarUri = "",
-        isCreatorMode = true,
-        zentoraAuthToken = "ZT-${UUID.randomUUID()}",
-        creatorLevel = "Rising Creator",
-        hasZentoraBadge = true
+    private const val PREFS_NAME = "nexora_vault1_session"
+    private const val KEY_AUTH_TOKEN = "auth_token"
+    private const val KEY_NEXORA_ID = "nexora_id"
+    private const val KEY_USERNAME = "username"
+    private const val KEY_EMAIL = "email"
+    private const val KEY_HANDLE = "handle"
+    private const val KEY_AVATAR = "avatar"
+    private const val KEY_IS_GOOGLE = "is_google"
+    private const val KEY_IS_GUEST = "is_guest"
+
+    private val _sessionState = MutableStateFlow(
+        NexoraSession(
+            nexoraId = "",
+            username = "",
+            email = "",
+            handle = "",
+            avatarUri = "",
+            isCreatorMode = true,
+            zentoraAuthToken = "",
+            creatorLevel = "Rising Creator",
+            hasZentoraBadge = true,
+            isSignedInWithGoogle = false,
+            isGuest = false
+        )
     )
 
-    fun getSession(): NexoraSession = activeSession
+    val sessionFlow: StateFlow<NexoraSession> = _sessionState.asStateFlow()
 
-    fun updateSession(username: String, handle: String, isCreatorMode: Boolean, avatarUri: String = "") {
-        activeSession = activeSession.copy(
+    fun initSession(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val token = prefs.getString(KEY_AUTH_TOKEN, "") ?: ""
+        val nexoraId = prefs.getString(KEY_NEXORA_ID, "") ?: ""
+        val isGuest = prefs.getBoolean(KEY_IS_GUEST, false)
+
+        if (token.isNotBlank() || isGuest) {
+            _sessionState.value = NexoraSession(
+                nexoraId = if (nexoraId.isNotBlank()) nexoraId else "NX-${UUID.randomUUID().toString().take(8).uppercase()}",
+                username = prefs.getString(KEY_USERNAME, if (isGuest) "Guest Streamer" else "Zentora CLC") ?: "",
+                email = prefs.getString(KEY_EMAIL, if (isGuest) "guest@zentora.stream" else "core@zentora.org") ?: "",
+                handle = prefs.getString(KEY_HANDLE, if (isGuest) "@guest" else "@zentora") ?: "",
+                avatarUri = prefs.getString(KEY_AVATAR, "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150") ?: "",
+                isCreatorMode = true,
+                zentoraAuthToken = token,
+                creatorLevel = "Rising Creator",
+                hasZentoraBadge = !isGuest,
+                isSignedInWithGoogle = prefs.getBoolean(KEY_IS_GOOGLE, false),
+                isGuest = isGuest
+            )
+        }
+    }
+
+    fun hasActiveSession(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val token = prefs.getString(KEY_AUTH_TOKEN, "") ?: ""
+        val isGuest = prefs.getBoolean(KEY_IS_GUEST, false)
+        return token.isNotBlank() || isGuest
+    }
+
+    fun getSession(): NexoraSession = _sessionState.value
+
+    fun updateSession(
+        username: String,
+        handle: String,
+        isCreatorMode: Boolean,
+        avatarUri: String = "",
+        email: String = getSession().email,
+        isSignedInWithGoogle: Boolean = getSession().isSignedInWithGoogle
+    ) {
+        _sessionState.value = _sessionState.value.copy(
             username = username,
             handle = handle,
             isCreatorMode = isCreatorMode,
-            avatarUri = avatarUri
+            avatarUri = avatarUri,
+            email = email,
+            isSignedInWithGoogle = isSignedInWithGoogle
+        )
+    }
+
+    /**
+     * Links Google Authentication credentials, persists session in Vault 1 SharedPreferences,
+     * and generates a fresh Zentora Auth Token.
+     */
+    fun loginWithGoogle(
+        context: Context,
+        displayName: String,
+        email: String,
+        photoUrl: String?,
+        idToken: String?
+    ) {
+        val cleanHandle = "@" + (email.substringBefore("@").replace(".", "").lowercase().ifBlank { "zentoracreator" })
+        val newToken = idToken?.ifBlank { null } ?: "ZT-GOOGLE-${UUID.randomUUID()}"
+        val nexoraId = "NX-${UUID.randomUUID().toString().take(8).uppercase()}"
+        val avatar = photoUrl ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150"
+        val name = displayName.ifBlank { "Google Creator" }
+
+        val session = NexoraSession(
+            nexoraId = nexoraId,
+            username = name,
+            email = email,
+            handle = cleanHandle,
+            avatarUri = avatar,
+            isCreatorMode = true,
+            zentoraAuthToken = newToken,
+            creatorLevel = "Rising Creator",
+            hasZentoraBadge = true,
+            isSignedInWithGoogle = true,
+            isGuest = false
+        )
+        _sessionState.value = session
+
+        // Save in SharedPreferences for Vault 1 persistence
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_AUTH_TOKEN, newToken)
+            .putString(KEY_NEXORA_ID, nexoraId)
+            .putString(KEY_USERNAME, name)
+            .putString(KEY_EMAIL, email)
+            .putString(KEY_HANDLE, cleanHandle)
+            .putString(KEY_AVATAR, avatar)
+            .putBoolean(KEY_IS_GOOGLE, true)
+            .putBoolean(KEY_IS_GUEST, false)
+            .apply()
+    }
+
+    fun activateGuestMode(context: Context) {
+        val nexoraId = "NX-GUEST-${UUID.randomUUID().toString().take(6).uppercase()}"
+        val guestSession = NexoraSession(
+            nexoraId = nexoraId,
+            username = "Guest Streamer",
+            email = "guest@zentora.stream",
+            handle = "@guest",
+            avatarUri = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150",
+            isCreatorMode = false,
+            zentoraAuthToken = "ZT-GUEST-TOKEN",
+            creatorLevel = "Guest Explorer",
+            hasZentoraBadge = false,
+            isSignedInWithGoogle = false,
+            isGuest = true
+        )
+        _sessionState.value = guestSession
+
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_AUTH_TOKEN, "ZT-GUEST-TOKEN")
+            .putString(KEY_NEXORA_ID, nexoraId)
+            .putString(KEY_USERNAME, "Guest Streamer")
+            .putString(KEY_EMAIL, "guest@zentora.stream")
+            .putString(KEY_HANDLE, "@guest")
+            .putString(KEY_AVATAR, "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150")
+            .putBoolean(KEY_IS_GOOGLE, false)
+            .putBoolean(KEY_IS_GUEST, true)
+            .apply()
+    }
+
+    fun clearSession(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+        _sessionState.value = NexoraSession(
+            nexoraId = "",
+            username = "",
+            email = "",
+            handle = "",
+            avatarUri = "",
+            isCreatorMode = true,
+            zentoraAuthToken = "",
+            creatorLevel = "Rising Creator",
+            hasZentoraBadge = true,
+            isSignedInWithGoogle = false,
+            isGuest = false
         )
     }
 
