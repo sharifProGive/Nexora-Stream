@@ -46,7 +46,7 @@ import kotlinx.coroutines.launch
  * - Branded layout:
  *   * Centered Nexora Stream glowing brand logo with subtitle: "Nexora Stream · Zentora CLC"
  *   * Clean headline: "Sign in to Nexora"
- *   * Subtext: "Sync your channel, watch history, subscriptions, and Central Vaults 2 & 5"
+ *   * Subtext: "Sign in to access your channel, watch history, subscriptions, and playlists seamlessly across devices"
  *   * Prominent full-width white button: [Google G Logo] "Continue with Google"
  *   * "Use Nexora without an account" (Guest Mode text button below) for temporary anonymous browsing.
  */

@@ -39,6 +39,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
+import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.ui.components.FloatingReactionContainer
 import com.zentora.nexora.stream.ui.components.StreamCommentsBottomSheet
 import com.zentora.nexora.stream.ui.theme.NexoraRed
@@ -211,12 +212,11 @@ fun ShortsScreen(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             IconButton(
                                 onClick = {
-                                    val sendIntent = Intent().apply {
-                                        action = Intent.ACTION_SEND
-                                        putExtra(Intent.EXTRA_TEXT, "Watch '${video.title}' on Nexora Stream:\n${video.localUri}")
-                                        type = "text/plain"
-                                    }
-                                    context.startActivity(Intent.createChooser(sendIntent, "Share Video"))
+                                    val shareText = NexoraLinkManager.buildVideoShareText(
+                                        videoTitle = video.title,
+                                        videoId = video.id
+                                    )
+                                    NexoraLinkManager.launchSystemShare(context, shareText)
                                 },
                                 modifier = Modifier.size(44.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f))
                             ) {

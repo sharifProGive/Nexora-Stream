@@ -52,6 +52,7 @@ import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraDrm
 import com.zentora.nexora.stream.engine.NexoraIdManager
+import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.ui.components.*
 import com.zentora.nexora.stream.ui.theme.*
 import kotlinx.coroutines.delay
@@ -718,6 +719,24 @@ fun PlayerScreen(
                                     imageVector = if (interaction?.savedToWatchLater == true) Icons.Filled.BookmarkAdded else Icons.Outlined.WatchLater,
                                     contentDescription = "Watch Later",
                                     tint = if (interaction?.savedToWatchLater == true) NexoraRed else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            // Dynamic Video Share Button
+                            IconButton(
+                                onClick = {
+                                    val shareText = NexoraLinkManager.buildVideoShareText(
+                                        videoTitle = currentVideo.title,
+                                        videoId = currentVideo.id
+                                    )
+                                    NexoraLinkManager.launchSystemShare(context, shareText)
+                                },
+                                modifier = Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Share,
+                                    contentDescription = "Share Video",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }

@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -35,6 +36,7 @@ import com.zentora.nexora.stream.data.database.entities.ChannelEntity
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraIdManager
+import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.ui.components.formatMsToTime
 import com.zentora.nexora.stream.ui.theme.*
 import kotlinx.coroutines.launch
@@ -61,6 +63,7 @@ fun ChannelScreen(
     onBack: () -> Unit,
     onVideoClick: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val channelFlow = remember(channelId) { repository.getChannel(channelId) }
     val channel by channelFlow.collectAsState(initial = null)
@@ -73,6 +76,7 @@ fun ChannelScreen(
 
     var selectedTab by remember { mutableStateOf(ChannelSubTab.HOME) }
     var showAnalyticsModal by remember { mutableStateOf(false) }
+    var showOptionsMenu by remember { mutableStateOf(false) }
 
     val fallbackChannel = remember(channelId) {
         ChannelEntity(
@@ -110,8 +114,46 @@ fun ChannelScreen(
                     IconButton(onClick = {}) {
                         Icon(Icons.Outlined.Search, contentDescription = "Search channel")
                     }
-                    IconButton(onClick = {}) {
-                        Icon(Icons.Outlined.MoreVert, contentDescription = "Options")
+                    IconButton(
+                        onClick = {
+                            val handle = "@${currentChannel.channelName.lowercase().replace(" ", "_")}"
+                            val shareText = NexoraLinkManager.buildChannelShareText(
+                                channelName = currentChannel.channelName,
+                                handle = handle
+                            )
+                            NexoraLinkManager.launchSystemShare(context, shareText)
+                        }
+                    ) {
+                        Icon(Icons.Outlined.Share, contentDescription = "Share channel")
+                    }
+                    Box {
+                        IconButton(onClick = { showOptionsMenu = true }) {
+                            Icon(Icons.Outlined.MoreVert, contentDescription = "Options")
+                        }
+                        DropdownMenu(
+                            expanded = showOptionsMenu,
+                            onDismissRequest = { showOptionsMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Share") },
+                                onClick = {
+                                    showOptionsMenu = false
+                                    val handle = "@${currentChannel.channelName.lowercase().replace(" ", "_")}"
+                                    val shareText = NexoraLinkManager.buildChannelShareText(
+                                        channelName = currentChannel.channelName,
+                                        handle = handle
+                                    )
+                                    NexoraLinkManager.launchSystemShare(context, shareText)
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Outlined.Share, contentDescription = null)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                onClick = { showOptionsMenu = false }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -250,7 +292,14 @@ fun ChannelScreen(
                             }
 
                             FilledTonalButton(
-                                onClick = {},
+                                onClick = {
+                                    val handle = "@${currentChannel.channelName.lowercase().replace(" ", "_")}"
+                                    val shareText = NexoraLinkManager.buildChannelShareText(
+                                        channelName = currentChannel.channelName,
+                                        handle = handle
+                                    )
+                                    NexoraLinkManager.launchSystemShare(context, shareText)
+                                },
                                 modifier = Modifier.size(38.dp),
                                 shape = CircleShape,
                                 colors = ButtonDefaults.filledTonalButtonColors(
@@ -259,30 +308,56 @@ fun ChannelScreen(
                                 ),
                                 contentPadding = PaddingValues(0.dp)
                             ) {
-                                Icon(Icons.Outlined.Edit, contentDescription = "Edit channel", modifier = Modifier.size(18.dp))
+                                Icon(Icons.Outlined.Share, contentDescription = "Share channel", modifier = Modifier.size(18.dp))
                             }
                         }
                     } else {
-                        // Subscribe Button if viewing an external channel
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    repository.toggleSubscribe(currentChannel.channelId)
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp),
-                            shape = RoundedCornerShape(22.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (currentChannel.isSubscribed) MaterialTheme.colorScheme.surfaceVariant else NexoraRed
-                            )
+                        // Action row for external channel (Subscribe + Share)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = if (currentChannel.isSubscribed) "Subscribed" else "Subscribe",
-                                color = if (currentChannel.isSubscribed) MaterialTheme.colorScheme.onSurface else Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        repository.toggleSubscribe(currentChannel.channelId)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(22.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (currentChannel.isSubscribed) MaterialTheme.colorScheme.surfaceVariant else NexoraRed
+                                )
+                            ) {
+                                Text(
+                                    text = if (currentChannel.isSubscribed) "Subscribed" else "Subscribe",
+                                    color = if (currentChannel.isSubscribed) MaterialTheme.colorScheme.onSurface else Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            FilledTonalButton(
+                                onClick = {
+                                    val handle = "@${currentChannel.channelName.lowercase().replace(" ", "_")}"
+                                    val shareText = NexoraLinkManager.buildChannelShareText(
+                                        channelName = currentChannel.channelName,
+                                        handle = handle
+                                    )
+                                    NexoraLinkManager.launchSystemShare(context, shareText)
+                                },
+                                modifier = Modifier.size(44.dp),
+                                shape = CircleShape,
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0xFF272727),
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Icon(Icons.Outlined.Share, contentDescription = "Share channel", modifier = Modifier.size(20.dp))
+                            }
                         }
                     }
                 }

@@ -32,6 +32,32 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Deep-Link Intent Filter for Video Shares (https://nexora.to/{videoId}) -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="https"
+                    android:host="nexora.to"
+                    android:pathPrefix="/" />
+            </intent-filter>
+
+            <!-- Deep-Link Intent Filter for Channel Shares (https://nexora.stream/@{handle}) -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="https"
+                    android:host="nexora.stream"
+                    android:pathPrefix="/" />
+            </intent-filter>
         </activity>
     </application>
 

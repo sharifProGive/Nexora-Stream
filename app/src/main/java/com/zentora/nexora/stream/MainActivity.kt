@@ -2,6 +2,8 @@
 package com.zentora.nexora.stream
 
 import android.app.PictureInPictureParams
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -21,11 +23,17 @@ import com.zentora.nexora.stream.ui.components.NexoraStreamBottomNavBar
 import com.zentora.nexora.stream.ui.components.NexoraStreamTopAppBar
 import com.zentora.nexora.stream.ui.screens.*
 import com.zentora.nexora.stream.ui.theme.NexoraStreamTheme
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var repository: NexoraStreamRepository
     private var activePlayingVideoId: String? = null
+
+    // Deep-link intent state observable by Compose
+    private val deepLinkVideoId = mutableStateOf<String?>(null)
+    private val deepLinkChannelHandle = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,9 +43,13 @@ class MainActivity : ComponentActivity() {
         NexoraIdManager.initSession(applicationContext)
         repository = NexoraStreamRepository.getInstance(applicationContext)
 
+        // Parse deep link from starting intent
+        parseDeepLink(intent)
+
         setContent {
             val isKidsMode by repository.isKidsMode.collectAsState()
             val userSession by NexoraIdManager.sessionFlow.collectAsState()
+            val scope = rememberCoroutineScope()
 
             NexoraStreamTheme(darkTheme = true) {
                 // Check if user has an active session in Vault 1 (Room DB / DataStore / Prefs)
@@ -58,6 +70,35 @@ class MainActivity : ComponentActivity() {
                     var currentRoute by remember { mutableStateOf("home") }
                     var selectedVideoId by remember { mutableStateOf<String?>(null) }
                     var selectedChannelId by remember { mutableStateOf<String?>(null) }
+
+                    // Deep-link triggers
+                    val dlVideoId by deepLinkVideoId
+                    val dlChannelHandle by deepLinkChannelHandle
+
+                    LaunchedEffect(dlVideoId) {
+                        dlVideoId?.let { vId ->
+                            selectedVideoId = vId
+                            currentRoute = "player"
+                            deepLinkVideoId.value = null
+                        }
+                    }
+
+                    LaunchedEffect(dlChannelHandle) {
+                        dlChannelHandle?.let { handle ->
+                            scope.launch {
+                                // Match handle against existing channels or fallback to official core channel
+                                val channels = repository.allChannels.firstOrNull() ?: emptyList()
+                                val cleanHandle = handle.removePrefix("@").lowercase()
+                                val matched = channels.find { ch ->
+                                    val chHandle = ch.channelName.lowercase().replace(" ", "_")
+                                    chHandle == cleanHandle || ch.channelId.equals(cleanHandle, ignoreCase = true)
+                                }
+                                selectedChannelId = matched?.channelId ?: "ch_zentora_core"
+                                currentRoute = "channel"
+                                deepLinkChannelHandle.value = null
+                            }
+                        }
+                    }
 
                     LaunchedEffect(selectedVideoId) {
                         activePlayingVideoId = selectedVideoId
@@ -217,6 +258,43 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        parseDeepLink(intent)
+    }
+
+    private fun parseDeepLink(intent: Intent?) {
+        val data: Uri? = intent?.data
+        if (data != null && intent.action == Intent.ACTION_VIEW) {
+            val host = data.host?.lowercase()
+            val path = data.path ?: ""
+
+            when {
+                // Video deep link: https://nexora.to/{videoId}
+                host == "nexora.to" -> {
+                    val segments = data.pathSegments
+                    if (segments.isNotEmpty()) {
+                        val videoId = segments[0]
+                        if (videoId.isNotBlank()) {
+                            deepLinkVideoId.value = videoId
+                        }
+                    }
+                }
+                // Channel deep link: https://nexora.stream/@{handle}
+                host == "nexora.stream" -> {
+                    val segments = data.pathSegments
+                    if (segments.isNotEmpty()) {
+                        val handle = segments[0]
+                        if (handle.isNotBlank()) {
+                            deepLinkChannelHandle.value = handle
                         }
                     }
                 }

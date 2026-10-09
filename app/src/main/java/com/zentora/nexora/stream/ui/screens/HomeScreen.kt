@@ -17,7 +17,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material.icons.outlined.WatchLater
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -35,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
+import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.engine.NexoraSmartRank
 import com.zentora.nexora.stream.engine.TrendingRadar
 import com.zentora.nexora.stream.ui.components.formatMsToTime
@@ -309,17 +312,53 @@ fun HomeScreen(
                                     }
                                 }
 
-                                // 3-Dots Menu Button
-                                IconButton(
-                                    onClick = {},
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.MoreVert,
-                                        contentDescription = "Menu",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp)
-                                    )
+                                // 3-Dots Menu Button with dynamic share
+                                var showMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    IconButton(
+                                        onClick = { showMenu = true },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.MoreVert,
+                                            contentDescription = "Menu",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+
+                                    DropdownMenu(
+                                        expanded = showMenu,
+                                        onDismissRequest = { showMenu = false }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Share") },
+                                            onClick = {
+                                                showMenu = false
+                                                val shareText = NexoraLinkManager.buildVideoShareText(
+                                                    videoTitle = video.title,
+                                                    videoId = video.id
+                                                )
+                                                NexoraLinkManager.launchSystemShare(context, shareText)
+                                            },
+                                            leadingIcon = {
+                                                Icon(Icons.Outlined.Share, contentDescription = null)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Save to Watch later") },
+                                            onClick = {
+                                                showMenu = false
+                                                scope.launch {
+                                                    repository.toggleWatchLater(video.id)
+                                                    Toast.makeText(context, "Saved to Watch later", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            leadingIcon = {
+                                                Icon(Icons.Outlined.WatchLater, contentDescription = null)
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
