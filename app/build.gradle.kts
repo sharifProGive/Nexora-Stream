@@ -29,9 +29,9 @@ android {
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
+      storePassword = "android123"
       keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      keyPassword = "android123"
     }
   }
 
