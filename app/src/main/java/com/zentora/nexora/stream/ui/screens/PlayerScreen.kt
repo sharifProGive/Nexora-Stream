@@ -4,8 +4,10 @@ package com.zentora.nexora.stream.ui.screens
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.util.Rational
 import android.view.ViewGroup
@@ -35,7 +37,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -55,8 +56,22 @@ import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.ui.components.*
 import com.zentora.nexora.stream.ui.theme.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+data class NexoraAdData(
+    val adId: String,
+    val title: String,
+    val sponsorName: String,
+    val adMediaUrl: String,
+    val clickThroughUrl: String,
+    val skippableAfterSeconds: Int
+)
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -87,6 +102,12 @@ fun PlayerScreen(
     var isBuffering by remember { mutableStateOf(false) }
     var isFullscreen by remember { mutableStateOf(false) }
 
+    // Zentora 5th Vault Ad Engine State
+    var isAdActive by remember { mutableStateOf(false) }
+    var currentAd by remember { mutableStateOf<NexoraAdData?>(null) }
+    var adCountdownRemaining by remember { mutableIntStateOf(5) }
+    var isAdSkippable by remember { mutableStateOf(false) }
+
     // Feature 9: One-Tap Screen Touch Lock
     var isTouchLocked by remember { mutableStateOf(false) }
 
@@ -114,15 +135,10 @@ fun PlayerScreen(
         parseChapterMarkers(currentVideo?.chapterMarkersJson ?: "[]")
     }
 
-    // Media3 ExoPlayer instance with optimized buffer management (Feature 4)
+    // Media3 ExoPlayer instance
     val exoPlayer = remember {
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                /* minBufferMs = */ 15_000,
-                /* maxBufferMs = */ 50_000,
-                /* bufferForPlaybackMs = */ 1_000,
-                /* bufferForPlaybackAfterRebufferMs = */ 2_500
-            )
+            .setBufferDurationsMs(15_000, 50_000, 1_000, 2_500)
             .build()
 
         ExoPlayer.Builder(context)
@@ -134,12 +150,32 @@ fun PlayerScreen(
             }
     }
 
+    // Function to play Main Target Video
+    val playMainVideo: () -> Unit = {
+        isAdActive = false
+        currentAd = null
+        if (currentVideo != null) {
+            val maskedUri = NexoraDrm.maskUri(currentVideo.localUri)
+            val physicalUri = NexoraDrm.resolveUri(maskedUri)
+            exoPlayer.setMediaItem(MediaItem.fromUri(physicalUri))
+            exoPlayer.prepare()
+            exoPlayer.play()
+            scope.launch {
+                repository.recordView(currentVideo.id, currentVideo.duration, 0L)
+            }
+        }
+    }
+
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 isBuffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     totalDurationMs = maxOf(1L, exoPlayer.duration)
+                } else if (state == Player.STATE_ENDED) {
+                    if (isAdActive) {
+                        playMainVideo()
+                    }
                 }
             }
 
@@ -156,27 +192,72 @@ fun PlayerScreen(
         }
     }
 
-    // Load video with DRM masking applied (Feature 26)
+    // Pre-Roll Ad Check & Launch Engine
     LaunchedEffect(currentVideo?.id) {
-        if (currentVideo != null) {
-            val maskedUri = NexoraDrm.maskUri(currentVideo.localUri)
-            val physicalUri = NexoraDrm.resolveUri(maskedUri)
-            val mediaItem = MediaItem.fromUri(physicalUri)
-            exoPlayer.setMediaItem(mediaItem)
+        if (currentVideo == null) return@LaunchedEffect
+
+        var fetchedAd: NexoraAdData? = null
+        withContext(Dispatchers.IO) {
+            try {
+                val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/ads/pre-roll")
+                val connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                }
+                if (connection.responseCode == 200) {
+                    val respText = connection.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(respText)
+                    if (json.optBoolean("hasAd", false) && json.has("ad")) {
+                        val adObj = json.getJSONObject("ad")
+                        fetchedAd = NexoraAdData(
+                            adId = adObj.optString("adId"),
+                            title = adObj.optString("title"),
+                            sponsorName = adObj.optString("sponsorName"),
+                            adMediaUrl = adObj.optString("adMediaUrl"),
+                            clickThroughUrl = adObj.optString("clickThroughUrl"),
+                            skippableAfterSeconds = adObj.optInt("skippableAfterSeconds", 5)
+                        )
+                    }
+                }
+                connection.disconnect()
+            } catch (_: Exception) {
+                fetchedAd = null
+            }
+        }
+
+        if (fetchedAd != null && fetchedAd?.adMediaUrl?.isNotEmpty() == true) {
+            currentAd = fetchedAd
+            isAdActive = true
+            adCountdownRemaining = fetchedAd?.skippableAfterSeconds ?: 5
+            isAdSkippable = false
+
+            exoPlayer.setMediaItem(MediaItem.fromUri(fetchedAd!!.adMediaUrl))
             exoPlayer.prepare()
             exoPlayer.play()
-            // Increment view count in Room database
-            repository.recordView(currentVideo.id, currentVideo.duration, 0L)
+        } else {
+            playMainVideo()
         }
     }
 
-    // Periodic time loop + A-B Loop checking (Feature 8)
+    // Ad Countdown Timer Logic
+    LaunchedEffect(isAdActive, adCountdownRemaining) {
+        if (isAdActive && adCountdownRemaining > 0) {
+            delay(1000L)
+            adCountdownRemaining -= 1
+            if (adCountdownRemaining <= 0) {
+                isAdSkippable = true
+            }
+        }
+    }
+
+    // Periodic time loop
     LaunchedEffect(isPlaying, isLoopActive, loopStartMs, loopEndMs) {
         while (isPlaying) {
             currentPositionMs = exoPlayer.currentPosition
             totalDurationMs = maxOf(1L, exoPlayer.duration)
 
-            if (isLoopActive && loopStartMs != null && loopEndMs != null) {
+            if (!isAdActive && isLoopActive && loopStartMs != null && loopEndMs != null) {
                 if (currentPositionMs >= loopEndMs!!) {
                     exoPlayer.seekTo(loopStartMs!!)
                 }
@@ -223,9 +304,8 @@ fun PlayerScreen(
                     .fillMaxWidth()
                     .then(if (isFullscreen) Modifier.fillMaxSize() else Modifier.aspectRatio(16f / 9f))
                     .background(Color.Black)
-                    // Gestures: Vertical swipe for Brightness & Volume (Feature 10)
-                    .pointerInput(isTouchLocked) {
-                        if (!isTouchLocked) {
+                    .pointerInput(isTouchLocked, isAdActive) {
+                        if (!isTouchLocked && !isAdActive) {
                             detectVerticalDragGestures(
                                 onDragEnd = {
                                     brightnessOverlay = null
@@ -256,14 +336,15 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    // Tap gestures: Single tap toggle controls, Double tap seek 10s (Feature 10)
-                    .pointerInput(isTouchLocked) {
+                    .pointerInput(isTouchLocked, isAdActive) {
                         detectTapGestures(
                             onTap = {
-                                isControlsVisible = !isControlsVisible
+                                if (!isAdActive) {
+                                    isControlsVisible = !isControlsVisible
+                                }
                             },
                             onDoubleTap = { offset ->
-                                if (!isTouchLocked) {
+                                if (!isTouchLocked && !isAdActive) {
                                     val isLeft = offset.x < (size.width / 2)
                                     if (isLeft) {
                                         val p = maxOf(0L, exoPlayer.currentPosition - 10_000)
@@ -298,69 +379,141 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Feature 25: Floating Live Reaction Emojis
-                FloatingReactionContainer(
-                    modifier = Modifier.fillMaxSize(),
-                    onReactionSent = { em ->
-                        Toast.makeText(context, "Reaction $em broadcasted!", Toast.LENGTH_SHORT).show()
-                    }
-                )
-
-                // Double-Tap Feedback
-                doubleTapFeedback?.let { fb ->
+                // Dedicated Ad Engine UI Overlay
+                if (isAdActive && currentAd != null) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.Center)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.7f))
-                            .padding(14.dp)
+                            .fillMaxSize()
+                            .background(Color.Transparent)
                     ) {
-                        Text(text = fb, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    }
-                }
+                        // Top Ad Badge & Sponsor Info
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.75f),
+                            shape = RoundedCornerShape(bottomEnd = 10.dp),
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .clickable {
+                                    val clickUrl = currentAd?.clickThroughUrl ?: ""
+                                    if (clickUrl.isNotEmpty()) {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(clickUrl))
+                                        context.startActivity(intent)
+                                    }
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Ad",
+                                    color = Color.Black,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Color(0xFFFFCC00))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = currentAd?.sponsorName ?: "Sponsored",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Icon(
+                                    Icons.Filled.OpenInNew,
+                                    contentDescription = "Install",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
 
-                // Brightness & Volume HUD overlays
-                brightnessOverlay?.let { b ->
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.75f))
-                            .padding(14.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.BrightnessMedium, contentDescription = null, tint = Color.White)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Brightness: ${(b * 100).toInt()}%", color = Color.White, fontWeight = FontWeight.Bold)
+                        // Bottom-Right Skip Button / Countdown
+                        Surface(
+                            color = if (isAdSkippable) NexoraRed else Color.Black.copy(alpha = 0.8f),
+                            shape = RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(bottom = 20.dp)
+                                .clickable(enabled = isAdSkippable) {
+                                    playMainVideo()
+                                }
+                        ) {
+                            Text(
+                                text = if (isAdSkippable) "Skip Ad ⏭" else "Skip in ${adCountdownRemaining}s",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
                         }
                     }
                 }
 
-                volumeOverlay?.let { v ->
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.75f))
-                            .padding(14.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.VolumeUp, contentDescription = null, tint = Color.White)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Volume: $v%", color = Color.White, fontWeight = FontWeight.Bold)
+                // Normal Controls Overlay (Only active when Ad is finished)
+                if (!isAdActive) {
+                    FloatingReactionContainer(
+                        modifier = Modifier.fillMaxSize(),
+                        onReactionSent = { em ->
+                            Toast.makeText(context, "Reaction $em broadcasted!", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+
+                    doubleTapFeedback?.let { fb ->
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = 0.7f))
+                                .padding(14.dp)
+                        ) {
+                            Text(text = fb, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                        }
+                    }
+
+                    brightnessOverlay?.let { b ->
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = 0.75f))
+                                .padding(14.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.BrightnessMedium, contentDescription = null, tint = Color.White)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Brightness: ${(b * 100).toInt()}%", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    volumeOverlay?.let { v ->
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.Black.copy(alpha = 0.75f))
+                                .padding(14.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.VolumeUp, contentDescription = null, tint = Color.White)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Volume: $v%", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
 
-                // Buffering Indicator
                 if (isBuffering) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = NexoraRed)
                     }
                 }
 
-                // Feature 9: Touch Lock Status Floating Button
-                if (isTouchLocked) {
+                if (isTouchLocked && !isAdActive) {
                     IconButton(
                         onClick = {
                             isTouchLocked = false
@@ -376,9 +529,8 @@ fun PlayerScreen(
                     }
                 }
 
-                // Full Controls Overlay (Hidden when screen is touch-locked)
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = isControlsVisible && !isTouchLocked,
+                    visible = isControlsVisible && !isTouchLocked && !isAdActive,
                     enter = fadeIn(),
                     exit = fadeOut(),
                     modifier = Modifier.fillMaxSize()
@@ -388,7 +540,6 @@ fun PlayerScreen(
                             .fillMaxSize()
                             .background(Color.Black.copy(alpha = 0.45f))
                     ) {
-                        // Top Action Icons
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -402,7 +553,6 @@ fun PlayerScreen(
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                // Touch Lock Toggle (Feature 9)
                                 IconButton(onClick = {
                                     isTouchLocked = true
                                     Toast.makeText(context, "Screen Touch Locked", Toast.LENGTH_SHORT).show()
@@ -410,17 +560,14 @@ fun PlayerScreen(
                                     Icon(Icons.Filled.LockOpen, contentDescription = "Lock", tint = Color.White)
                                 }
 
-                                // Audio Track Switcher (Feature 6)
                                 IconButton(onClick = { showAudioTrackDialog = true }) {
                                     Icon(Icons.Filled.Audiotrack, contentDescription = "Audio track", tint = Color.White)
                                 }
 
-                                // Timestamped Notes & Bookmarks (Feature 7)
                                 IconButton(onClick = { showNotesModal = true }) {
                                     Icon(Icons.Filled.NoteAlt, contentDescription = "Notes", tint = Color.White)
                                 }
 
-                                // Picture-in-Picture (Feature 12)
                                 IconButton(onClick = {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
                                         val params = PictureInPictureParams.Builder()
@@ -434,7 +581,6 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Center Play / Pause
                         Row(
                             modifier = Modifier.align(Alignment.Center),
                             verticalAlignment = Alignment.CenterVertically,
@@ -468,14 +614,12 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Bottom Scrub Bar, Heatmap & Chapter Markers
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .align(Alignment.BottomCenter)
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            // Feature 11: Chapter Markers Bar
                             if (chapters.isNotEmpty()) {
                                 ChapterMarkersBar(
                                     markers = chapters,
@@ -485,13 +629,11 @@ fun PlayerScreen(
                                 )
                             }
 
-                            // Feature 5: Most Replayed Heatmap Canvas
                             ReplayedHeatmapCanvas(
                                 videoDurationMs = totalDurationMs,
                                 seed = currentVideo.id.hashCode()
                             )
 
-                            // Scrub Slider
                             Slider(
                                 value = currentPositionMs.toFloat(),
                                 onValueChange = { newPos ->
@@ -516,13 +658,11 @@ fun PlayerScreen(
                                 )
 
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    // Feature 8: A-B Repeat Loop button
                                     Surface(
                                         shape = RoundedCornerShape(4.dp),
                                         color = if (isLoopActive) NexoraRed else Color.White.copy(alpha = 0.2f),
                                         modifier = Modifier.clickable {
                                             if (!isLoopActive) {
-                                                // Start loop from current to +15s
                                                 loopStartMs = currentPositionMs
                                                 loopEndMs = minOf(totalDurationMs, currentPositionMs + 15000L)
                                                 isLoopActive = true
@@ -546,7 +686,6 @@ fun PlayerScreen(
 
                                     Spacer(modifier = Modifier.width(8.dp))
 
-                                    // Fullscreen Toggle
                                     IconButton(
                                         onClick = {
                                             val newFs = !isFullscreen
@@ -584,7 +723,6 @@ fun PlayerScreen(
                             )
                         }
 
-                        // Channel info & Subscribe button
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -626,7 +764,6 @@ fun PlayerScreen(
                                 }
                             }
 
-                            // Subscribe Button (Feature 24)
                             Button(
                                 onClick = {
                                     scope.launch {
@@ -647,14 +784,12 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Action Bar: Reactive Like/Dislike, Nexora Spark, Watch Later, Comments
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            // Like/Dislike pill (Feature 22)
                             Surface(
                                 shape = RoundedCornerShape(20.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant
@@ -693,7 +828,6 @@ fun PlayerScreen(
                                 }
                             }
 
-                            // Nexora Spark / Super Thanks (Feature 20)
                             Button(
                                 onClick = {
                                     scope.launch {
@@ -710,7 +844,6 @@ fun PlayerScreen(
                                 Text("Spark (${interaction?.sparksReceived ?: 0L})", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
                             }
 
-                            // Watch Later Toggle
                             IconButton(
                                 onClick = { scope.launch { repository.toggleWatchLater(currentVideo.id) } },
                                 modifier = Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
@@ -722,7 +855,6 @@ fun PlayerScreen(
                                 )
                             }
 
-                            // Dynamic Video Share Button
                             IconButton(
                                 onClick = {
                                     val shareText = NexoraLinkManager.buildVideoShareText(
@@ -741,7 +873,6 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Comments Preview Bar (Feature 23)
                         Card(
                             onClick = { showCommentsSheet = true },
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
@@ -779,7 +910,6 @@ fun PlayerScreen(
                         )
                     }
 
-                    // Up Next Video List
                     val related = allVideos.filter { it.id != currentVideo.id }
                     items(related, key = { it.id }) { relVideo ->
                         Row(
@@ -826,7 +956,6 @@ fun PlayerScreen(
         }
     }
 
-    // Audio Track Switcher Dialog (Feature 6)
     if (showAudioTrackDialog) {
         AudioTrackDialog(
             currentTrackId = currentAudioTrack,
@@ -839,7 +968,6 @@ fun PlayerScreen(
         )
     }
 
-    // Video Notes & Bookmarks Modal (Feature 7)
     if (showNotesModal) {
         VideoNotesModal(
             notes = notes,
@@ -858,7 +986,6 @@ fun PlayerScreen(
         )
     }
 
-    // Comments BottomSheet (Pillar 2: Zero Dummy Data)
     if (showCommentsSheet) {
         val commentsVm = remember(currentVideo.id) { CommentsViewModel(repository, currentVideo.id) }
         CommentsSheet(
