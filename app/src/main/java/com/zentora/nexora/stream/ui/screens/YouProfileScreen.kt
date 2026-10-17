@@ -51,13 +51,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * YouTube-style 'You' Screen matching exact screenshots (14-21-44 & 14-21-57):
+ * YouTube-style 'You' Screen matching exact design:
  * - Top bar: "Accounts v" pill + Cast, Notifications, Search, Settings icons.
- * - Header: Large circular avatar with gold/cyan border, Channel Name, @handle,
+ * - Header: Large circular avatar with gradient border, Channel Name, @handle,
  *   white pill "View channel", dark pill "Switch account".
- * - Prominent "Continue with Google" auth card and Account Switcher modal.
- * - Native AndroidX Credential Manager / Google ID integration without Firebase.
- * - Automatic cloud restore of user's uploaded videos, watch history, subscriptions, and playlists.
+ * - Feature: Dedicated Friends & Chat Quick Access Hub.
+ * - Native AndroidX Credential Manager / Google ID integration.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,7 +66,8 @@ fun YouProfileScreen(
     onViewChannel: (String) -> Unit,
     onSettingsClick: () -> Unit,
     onNotificationClick: () -> Unit = {},
-    onManageVideos: () -> Unit = {}
+    onManageVideos: () -> Unit = {},
+    onFriendsClick: () -> Unit = {} // Friends Gateway Navigation
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -115,7 +115,6 @@ fun YouProfileScreen(
                         }
                     }
                     is com.zentora.nexora.stream.engine.NexoraAuthResult.NeedsIntentFallback -> {
-                        // In YouProfileScreen, execute instant fallback completion
                         authManager.completeAuthentication(
                             displayName = "Zentora Verified Creator",
                             email = "creator@zentora.stream",
@@ -340,7 +339,87 @@ fun YouProfileScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                // ==================== ZENTORA FRIENDS & MESSAGES HUB ====================
+                Card(
+                    onClick = { onFriendsClick() },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF1E1E28)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .border(1.dp, Color(0xFF33334D), RoundedCornerShape(16.dp))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(NexoraRed.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.PeopleAlt,
+                                    contentDescription = "Friends Hub",
+                                    tint = NexoraRed,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(14.dp))
+
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Friends & Messages",
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp
+                                        ),
+                                        color = Color.White
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = NexoraRed,
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "CHAT",
+                                            color = Color.White,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Encrypted messaging, calls & contacts",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.Gray,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+
+                        Icon(
+                            imageVector = Icons.Filled.ChevronRight,
+                            contentDescription = "Open Friends",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
             }
 
             // ==================== 2. HISTORY SECTION ====================
