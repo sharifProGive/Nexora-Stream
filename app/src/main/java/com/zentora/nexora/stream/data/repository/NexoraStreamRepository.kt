@@ -255,71 +255,6 @@ class NexoraStreamRepository(private val context: Context) {
             dao.insertChannel(collabChannel)
         }
 
-        // Check if videos exist; if empty, insert initial platform reference streams with 0 views and 0 likes
-        val videoList = dao.getAllVideos().first()
-        if (videoList.isEmpty()) {
-            val sampleVideos = listOf(
-                VideoEntity(
-                    id = "vid_tears_of_steel",
-                    localUri = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
-                    title = "Tears of Steel - Open Source VFX Project",
-                    description = "Exploring open rendering pipelines and visual effects composition by Zentora CLC.",
-                    category = "Tech",
-                    tags = "VFX, OpenSource, CGI, Cyberpunk",
-                    timestamp = System.currentTimeMillis() - 86400000L,
-                    duration = 734000L,
-                    viewCount = 0L, // Initialized strictly at 0
-                    chapterMarkersJson = """[{"timeMs":0,"title":"Intro"},{"timeMs":120000,"title":"Lab Diagnostics"},{"timeMs":340000,"title":"Combat Protocol"},{"timeMs":560000,"title":"Climax"}]""",
-                    thumbnailUri = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800&auto=format&fit=crop&q=80",
-                    authorChannelId = "ch_zentora_core",
-                    collabChannelId = "ch_blender_open"
-                ),
-                VideoEntity(
-                    id = "vid_big_buck_bunny",
-                    localUri = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                    title = "Big Buck Bunny - 3D Computer Animation",
-                    description = "Classic computer graphics benchmark showcasing high framerate rendering.",
-                    category = "Animation",
-                    tags = "Animation, 3D, CGI, Nature",
-                    timestamp = System.currentTimeMillis() - 172800000L,
-                    duration = 596000L,
-                    viewCount = 0L,
-                    chapterMarkersJson = """[{"timeMs":0,"title":"Morning Awakening"},{"timeMs":180000,"title":"Forest Encounters"},{"timeMs":400000,"title":"The Trap"}]""",
-                    thumbnailUri = "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=800&auto=format&fit=crop&q=80",
-                    authorChannelId = "ch_blender_open"
-                ),
-                VideoEntity(
-                    id = "vid_alpine_escapes",
-                    localUri = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-                    title = "Alpine Ridgeline Mountain Descent",
-                    description = "High speed mountain biking pursuit through alpine ridgelines.",
-                    category = "Sports",
-                    tags = "MTB, Extreme, Alps, 4K",
-                    timestamp = System.currentTimeMillis() - 43200000L,
-                    duration = 15000L,
-                    viewCount = 0L,
-                    chapterMarkersJson = """[{"timeMs":0,"title":"Summit Drop"},{"timeMs":8000,"title":"Rocky Gap"}]""",
-                    thumbnailUri = "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=800&auto=format&fit=crop&q=80",
-                    authorChannelId = "ch_zentora_core"
-                )
-            )
-
-            for (video in sampleVideos) {
-                dao.insertVideo(video)
-                // Initialize clean interaction entity with 0 counters
-                dao.insertInteraction(
-                    InteractionEntity(
-                        videoId = video.id,
-                        likesCount = 0L,
-                        dislikesCount = 0L,
-                        isLikedByMe = false,
-                        isDislikedByMe = false,
-                        savedToWatchLater = false,
-                        sparksReceived = 0L
-                    )
-                )
-            }
-        }
     }
 
     // ==================== VIDEO METHODS ====================
@@ -674,6 +609,78 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun upsertChannel(channel: ChannelEntity) {
         dao.insertChannel(channel)
+    }
+
+    // ==================== PRIVATE FRIEND ENCLAVE (PILLAR 4) ====================
+    val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
+
+    suspend fun getPrivateProfile(): PrivateFriendProfileEntity? = dao.getPrivateProfileSync()
+
+    suspend fun isHandleTaken(handle: String): Boolean = dao.countHandleOccurrences(handle.trim()) > 0
+
+    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.insertPrivateProfile(profile)
+    }
+
+    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.updatePrivateProfile(profile)
+    }
+
+    fun getAllPrivateFriends(): Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
+
+    fun searchPrivateFriends(query: String): Flow<List<PrivateFriendEntity>> = dao.searchPrivateFriends(query)
+
+    suspend fun getPrivateFriend(handle: String): PrivateFriendEntity? = dao.getPrivateFriendByHandle(handle)
+
+    suspend fun addPrivateFriend(friend: PrivateFriendEntity) {
+        dao.insertPrivateFriend(friend)
+    }
+
+    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> =
+        dao.getMessagesForConversation(handle)
+
+    suspend fun sendChatMessage(
+        conversationHandle: String,
+        senderHandle: String,
+        text: String,
+        mediaUri: String? = null
+    ) {
+        val message = PrivateChatMessageEntity(
+            messageId = "msg_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
+            conversationHandle = conversationHandle,
+            senderHandle = senderHandle,
+            text = text,
+            mediaUri = mediaUri,
+            timestamp = System.currentTimeMillis(),
+            isFromMe = true,
+            isRead = true
+        )
+        dao.insertChatMessage(message)
+
+        val existingFriend = dao.getPrivateFriendByHandle(conversationHandle)
+        if (existingFriend != null) {
+            dao.updatePrivateFriend(
+                existingFriend.copy(
+                    lastMessage = text,
+                    lastMessageTimestamp = System.currentTimeMillis()
+                )
+            )
+        } else {
+            dao.insertPrivateFriend(
+                PrivateFriendEntity(
+                    handle = conversationHandle,
+                    displayName = conversationHandle.removePrefix("@"),
+                    lastMessage = text,
+                    lastMessageTimestamp = System.currentTimeMillis(),
+                    isOnline = true
+                )
+            )
+        }
+    }
+
+    suspend fun markConversationAsRead(handle: String) {
+        dao.markMessagesAsRead(handle)
+        dao.clearUnreadCount(handle)
     }
 
     companion object {

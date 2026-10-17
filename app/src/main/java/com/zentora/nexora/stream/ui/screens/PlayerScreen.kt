@@ -858,22 +858,12 @@ fun PlayerScreen(
         )
     }
 
-    // Comments BottomSheet (Feature 23 & 27)
+    // Comments BottomSheet (Pillar 2: Zero Dummy Data)
     if (showCommentsSheet) {
-        StreamCommentsBottomSheet(
-            comments = comments,
-            onDismiss = { showCommentsSheet = false },
-            onPostComment = { text ->
-                var isSafe = true
-                scope.launch {
-                    val user = NexoraIdManager.getSession()
-                    isSafe = repository.addComment(currentVideo.id, user.username, text)
-                }
-                isSafe
-            },
-            onLikeComment = { comment ->
-                scope.launch { repository.toggleCommentLike(comment) }
-            }
+        val commentsVm = remember(currentVideo.id) { CommentsViewModel(repository, currentVideo.id) }
+        CommentsSheet(
+            viewModel = commentsVm,
+            onDismiss = { showCommentsSheet = false }
         )
     }
 }

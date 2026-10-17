@@ -125,4 +125,58 @@ interface NexoraDao {
 
     @Query("DELETE FROM community_posts WHERE postId = :postId")
     suspend fun deleteCommunityPost(postId: String)
+
+    // ==================== PRIVATE FRIEND ENCLAVE (PILLAR 4) ====================
+    @Query("SELECT * FROM private_friend_profile LIMIT 1")
+    fun getPrivateProfile(): Flow<PrivateFriendProfileEntity?>
+
+    @Query("SELECT * FROM private_friend_profile LIMIT 1")
+    suspend fun getPrivateProfileSync(): PrivateFriendProfileEntity?
+
+    @Query("SELECT COUNT(*) FROM private_friend_profile WHERE LOWER(handle) = LOWER(:handle)")
+    suspend fun countHandleOccurrences(handle: String): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPrivateProfile(profile: PrivateFriendProfileEntity)
+
+    @Update
+    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity)
+
+    @Query("DELETE FROM private_friend_profile")
+    suspend fun deletePrivateProfile()
+
+    // Private Friends / Directory
+    @Query("SELECT * FROM private_friends ORDER BY lastMessageTimestamp DESC")
+    fun getAllPrivateFriends(): Flow<List<PrivateFriendEntity>>
+
+    @Query("SELECT * FROM private_friends WHERE displayName LIKE '%' || :query || '%' OR handle LIKE '%' || :query || '%' ORDER BY lastMessageTimestamp DESC")
+    fun searchPrivateFriends(query: String): Flow<List<PrivateFriendEntity>>
+
+    @Query("SELECT * FROM private_friends WHERE handle = :handle LIMIT 1")
+    suspend fun getPrivateFriendByHandle(handle: String): PrivateFriendEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPrivateFriend(friend: PrivateFriendEntity)
+
+    @Update
+    suspend fun updatePrivateFriend(friend: PrivateFriendEntity)
+
+    @Query("DELETE FROM private_friends WHERE handle = :handle")
+    suspend fun deletePrivateFriend(handle: String)
+
+    // Private Chat Messages
+    @Query("SELECT * FROM private_chat_messages WHERE conversationHandle = :handle ORDER BY timestamp ASC")
+    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertChatMessage(message: PrivateChatMessageEntity)
+
+    @Query("UPDATE private_chat_messages SET isRead = 1 WHERE conversationHandle = :handle AND isFromMe = 0")
+    suspend fun markMessagesAsRead(handle: String)
+
+    @Query("UPDATE private_friends SET unreadCount = 0 WHERE handle = :handle")
+    suspend fun clearUnreadCount(handle: String)
+
+    @Query("DELETE FROM private_chat_messages WHERE messageId = :messageId")
+    suspend fun deleteChatMessage(messageId: String)
 }

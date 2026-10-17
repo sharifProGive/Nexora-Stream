@@ -302,22 +302,12 @@ fun ShortsScreen(
         }
     }
 
-    // Comments Sheet
+    // Comments Sheet (Pillar 2: Zero Dummy Data)
     showCommentsForVideoId?.let { vId ->
-        val commentsList by repository.getComments(vId).collectAsState(initial = emptyList())
-        StreamCommentsBottomSheet(
-            comments = commentsList,
-            onDismiss = { showCommentsForVideoId = null },
-            onPostComment = { text ->
-                var isSafe = true
-                scope.launch {
-                    isSafe = repository.addComment(vId, "Zentora Member", text)
-                }
-                isSafe
-            },
-            onLikeComment = { comment ->
-                scope.launch { repository.toggleCommentLike(comment) }
-            }
+        val commentsVm = remember(vId) { CommentsViewModel(repository, vId) }
+        CommentsSheet(
+            viewModel = commentsVm,
+            onDismiss = { showCommentsForVideoId = null }
         )
     }
 }

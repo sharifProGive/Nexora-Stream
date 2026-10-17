@@ -18,7 +18,7 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Share
-import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material.icons.outlined.WatchLater
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -31,6 +31,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,73 +39,42 @@ import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraLinkManager
-import com.zentora.nexora.stream.engine.NexoraSmartRank
-import com.zentora.nexora.stream.engine.TrendingRadar
 import com.zentora.nexora.stream.ui.components.formatMsToTime
 import com.zentora.nexora.stream.ui.theme.NexoraRed
-import com.zentora.nexora.stream.ui.theme.NexoraSparkGold
 import com.zentora.nexora.stream.ui.theme.NexoraVerifiedTick
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
- * YouTube-style Home Screen matching screenshot (14-21-38):
- * - Compass Explore icon + category chips rail [All, Tech, Animation, Gaming, Natok, News, ...]
- * - High-fidelity video feed cards with duration badge, channel avatar, title, channel info, and 3-dots menu.
- * - In-feed Shorts section with red Shorts logo and side-by-side vertical cards.
+ * YouTube-style Home Screen with Pillar 2 Zero-Dummy Data & Pure Empty States:
+ * - When database has 0 videos, strictly displays real empty state:
+ *   Icon: VideoLibrary
+ *   Title: "No videos available"
+ *   Subtext: "Upload a video to get started"
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     repository: NexoraStreamRepository,
+    viewModel: HomeViewModel = remember { HomeViewModel(repository) },
     onVideoClick: (String) -> Unit,
-    onChannelClick: (String) -> Unit
+    onChannelClick: (String) -> Unit,
+    onUploadClick: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
-    val allVideos by repository.allVideos.collectAsState(initial = emptyList())
-    val allHistory by repository.allHistory.collectAsState(initial = emptyList())
-    val allChannels by repository.allChannels.collectAsState(initial = emptyList())
-    val isKidsMode by repository.isKidsMode.collectAsState()
+    val allVideos by viewModel.allVideos.collectAsState()
+    val displayedVideos by viewModel.displayedVideos.collectAsState()
+    val allChannels by viewModel.allChannels.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val selectedCategory by viewModel.selectedCategory.collectAsState()
 
-    var isRefreshing by remember { mutableStateOf(false) }
-    var selectedCategory by remember { mutableStateOf("All") }
-
-    val categories = remember {
-        listOf("All", "Tech", "Animation", "Gaming", "Natok", "Music", "Science", "Education", "Sports")
-    }
-
-    // Filter videos by category and kids mode
-    val displayedVideos = remember(allVideos, allHistory, selectedCategory, isKidsMode) {
-        val baseList = if (isKidsMode) {
-            allVideos.filter { it.category == "Animation" || it.category == "Education" }
-        } else {
-            allVideos
-        }
-
-        if (selectedCategory == "All") {
-            NexoraSmartRank.rankVideos(baseList, emptyMap(), allHistory)
-        } else {
-            baseList.filter { it.category.equals(selectedCategory, ignoreCase = true) }
-        }
-    }
-
-    // Shorts list for the in-feed Shorts carousel
+    // Shorts list from actual database videos only
     val shortsList = remember(allVideos) {
-        allVideos.filter { it.duration <= 65000L }.take(6)
+        allVideos.filter { it.duration in 1..65000L || it.tags.contains("Short", ignoreCase = true) }.take(6)
     }
 
     PullToRefreshBox(
         isRefreshing = isRefreshing,
-        onRefresh = {
-            scope.launch {
-                isRefreshing = true
-                delay(800)
-                isRefreshing = false
-                Toast.makeText(context, "Feed refreshed", Toast.LENGTH_SHORT).show()
-            }
-        },
+        onRefresh = { viewModel.refresh() },
         modifier = Modifier.fillMaxSize().testTag("home_screen_pull_refresh")
     ) {
         LazyColumn(
@@ -112,7 +82,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            // ==================== 1. CATEGORY CHIP RAIL WITH EXPLORE ICON ====================
+            // ==================== 1. CATEGORY CHIP RAIL ====================
             item {
                 Row(
                     modifier = Modifier
@@ -122,7 +92,7 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Explore Compass icon button (like YouTube screenshot 14-21-38)
+                    // Explore Compass icon button
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -146,14 +116,14 @@ fun HomeScreen(
                     }
 
                     // Category Chips
-                    categories.forEach { cat ->
+                    viewModel.categories.forEach { cat ->
                         val isSelected = selectedCategory == cat
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceVariant,
                             modifier = Modifier
                                 .height(32.dp)
-                                .clickable { selectedCategory = cat }
+                                .clickable { viewModel.selectCategory(cat) }
                         ) {
                             Box(
                                 contentAlignment = Alignment.Center,
@@ -171,19 +141,42 @@ fun HomeScreen(
                 }
             }
 
-            // ==================== 2. MAIN VIDEO FEED ====================
+            // ==================== 2. MAIN VIDEO FEED OR ZERO-DUMMY EMPTY STATE ====================
             if (displayedVideos.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
+                            .fillParentMaxHeight(0.75f)
                             .fillMaxWidth()
-                            .padding(48.dp),
+                            .padding(horizontal = 32.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = if (isKidsMode) "Kids Mode is active. No matching safe content." else "No videos in this category. Upload one using (+)!",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.VideoLibrary,
+                                contentDescription = "No videos available",
+                                tint = Color.Gray,
+                                modifier = Modifier.size(72.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No videos available",
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Upload a video to get started",
+                                color = Color.Gray,
+                                fontSize = 14.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 }
             } else {
@@ -202,18 +195,16 @@ fun HomeScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(16f / 9f)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .background(Color(0xFF181818))
                             ) {
-                                if (video.thumbnailUri.isNotBlank()) {
-                                    AsyncImage(
-                                        model = video.thumbnailUri,
-                                        contentDescription = video.title,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
+                                AsyncImage(
+                                    model = video.thumbnailUri.ifBlank { video.localUri },
+                                    contentDescription = video.title,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
 
-                                // Duration Badge (Bottom-Right, black background with rounded corners)
+                                // Duration Badge
                                 Surface(
                                     shape = RoundedCornerShape(4.dp),
                                     color = Color.Black.copy(alpha = 0.85f),
@@ -226,31 +217,12 @@ fun HomeScreen(
                                         color = Color.White,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
-                                }
-
-                                // Premiere Badge if applicable
-                                if (video.isPremiere) {
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = NexoraRed,
-                                        modifier = Modifier
-                                            .align(Alignment.TopStart)
-                                            .padding(8.dp)
-                                    ) {
-                                        Text(
-                                            text = "PREMIERE",
-                                            color = Color.White,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Black,
-                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                                        )
-                                    }
                                 }
                             }
 
-                            // Video Info Row below thumbnail
+                            // Info Row (Avatar + Details + 3-dot)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -262,57 +234,64 @@ fun HomeScreen(
                                     modifier = Modifier
                                         .size(38.dp)
                                         .clip(CircleShape)
-                                        .clickable { onChannelClick(video.authorChannelId) }
+                                        .background(Color(0xFF2A2A2A))
+                                        .clickable { onChannelClick(video.authorChannelId) },
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    AsyncImage(
-                                        model = authorChannel?.avatarUri ?: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150",
-                                        contentDescription = "Channel Avatar",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
+                                    if (authorChannel?.avatarUri?.isNotBlank() == true) {
+                                        AsyncImage(
+                                            model = authorChannel.avatarUri,
+                                            contentDescription = authorChannel.channelName,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Text(
+                                            text = (authorChannel?.channelName ?: video.authorChannelId).take(1).uppercase(),
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp
+                                        )
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.width(12.dp))
 
-                                // Title and Subtitle Info
+                                // Title and Metadata
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = video.title,
-                                        style = MaterialTheme.typography.bodyLarge.copy(
-                                            fontWeight = FontWeight.Medium,
-                                            lineHeight = 20.sp
-                                        ),
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.onBackground,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
-
-                                    Spacer(modifier = Modifier.height(3.dp))
-
-                                    // Subtitle: Channel name • views • time
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = "${authorChannel?.channelName ?: "Zentora CLC"} • ${video.viewCount} views",
-                                            style = MaterialTheme.typography.bodySmall,
+                                            text = authorChannel?.channelName ?: "Nexora Creator",
+                                            fontSize = 12.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-
                                         if (authorChannel?.hasZentoraBadge == true) {
                                             Spacer(modifier = Modifier.width(4.dp))
                                             Icon(
                                                 imageVector = Icons.Filled.CheckCircle,
                                                 contentDescription = "Verified",
                                                 tint = NexoraVerifiedTick,
-                                                modifier = Modifier.size(12.dp)
+                                                modifier = Modifier.size(13.dp)
                                             )
                                         }
+                                        Text(
+                                            text = " • ${video.viewCount} views",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
 
-                                // 3-Dots Menu Button with dynamic share
+                                // 3-dot Menu
                                 var showMenu by remember { mutableStateOf(false) }
                                 Box {
                                     IconButton(
@@ -320,42 +299,31 @@ fun HomeScreen(
                                         modifier = Modifier.size(24.dp)
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Filled.MoreVert,
-                                            contentDescription = "Menu",
+                                            imageVector = Icons.Default.MoreVert,
+                                            contentDescription = "Options",
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier.size(18.dp)
                                         )
                                     }
-
                                     DropdownMenu(
                                         expanded = showMenu,
                                         onDismissRequest = { showMenu = false }
                                     ) {
                                         DropdownMenuItem(
-                                            text = { Text("Share") },
+                                            text = { Text("Save to Watch later") },
+                                            leadingIcon = { Icon(Icons.Outlined.WatchLater, contentDescription = null) },
                                             onClick = {
                                                 showMenu = false
-                                                val shareText = NexoraLinkManager.buildVideoShareText(
-                                                    videoTitle = video.title,
-                                                    videoId = video.id
-                                                )
-                                                NexoraLinkManager.launchSystemShare(context, shareText)
-                                            },
-                                            leadingIcon = {
-                                                Icon(Icons.Outlined.Share, contentDescription = null)
+                                                Toast.makeText(context, "Saved to Watch later", Toast.LENGTH_SHORT).show()
                                             }
                                         )
                                         DropdownMenuItem(
-                                            text = { Text("Save to Watch later") },
+                                            text = { Text("Share") },
+                                            leadingIcon = { Icon(Icons.Outlined.Share, contentDescription = null) },
                                             onClick = {
                                                 showMenu = false
-                                                scope.launch {
-                                                    repository.toggleWatchLater(video.id)
-                                                    Toast.makeText(context, "Saved to Watch later", Toast.LENGTH_SHORT).show()
-                                                }
-                                            },
-                                            leadingIcon = {
-                                                Icon(Icons.Outlined.WatchLater, contentDescription = null)
+                                                val payload = NexoraLinkManager.buildVideoShareText(video.title, video.id)
+                                                NexoraLinkManager.launchSystemShare(context, payload)
                                             }
                                         )
                                     }
@@ -364,120 +332,87 @@ fun HomeScreen(
                         }
                     }
 
-                    // In-Feed Shorts Section (matching screenshot 14-21-38 after the first video!)
-                    if (index == 0 && shortsList.isNotEmpty()) {
+                    // In-feed Shorts row between items 1 and 2
+                    if (index == 1 && shortsList.isNotEmpty()) {
                         item {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 12.dp)
-                            ) {
-                                // Shorts Header (Red Shorts Icon + bold title "Shorts" + 3 dots)
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Filled.FlashOn,
-                                            contentDescription = "Shorts",
-                                            tint = NexoraRed,
-                                            modifier = Modifier.size(22.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Shorts",
-                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                            color = MaterialTheme.colorScheme.onBackground
-                                        )
-                                    }
-                                    IconButton(onClick = {}, modifier = Modifier.size(24.dp)) {
-                                        Icon(
-                                            imageVector = Icons.Filled.MoreVert,
-                                            contentDescription = "Menu",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
+                            InFeedShortsSection(
+                                shorts = shortsList,
+                                onShortClick = { onVideoClick(it.id) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
-                                // 2-Column / Side-by-side vertical Shorts rail
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    shortsList.take(2).forEach { shortItem ->
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = MaterialTheme.colorScheme.surfaceVariant,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height(260.dp)
-                                                .clickable { onVideoClick(shortItem.id) }
-                                        ) {
-                                            Box(modifier = Modifier.fillMaxSize()) {
-                                                if (shortItem.thumbnailUri.isNotBlank()) {
-                                                    AsyncImage(
-                                                        model = shortItem.thumbnailUri,
-                                                        contentDescription = shortItem.title,
-                                                        modifier = Modifier.fillMaxSize(),
-                                                        contentScale = ContentScale.Crop
-                                                    )
-                                                }
+@Composable
+fun InFeedShortsSection(
+    shorts: List<VideoEntity>,
+    onShortClick: (VideoEntity) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.FlashOn,
+                contentDescription = "Shorts",
+                tint = NexoraRed,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "Shorts",
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+        }
 
-                                                // 3-dots on top right
-                                                IconButton(
-                                                    onClick = {},
-                                                    modifier = Modifier
-                                                        .align(Alignment.TopEnd)
-                                                        .padding(4.dp)
-                                                        .size(24.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Filled.MoreVert,
-                                                        contentDescription = "Options",
-                                                        tint = Color.White,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                }
-
-                                                // Title and view count overlay at bottom
-                                                Column(
-                                                    modifier = Modifier
-                                                        .align(Alignment.BottomStart)
-                                                        .padding(10.dp)
-                                                ) {
-                                                    Text(
-                                                        text = shortItem.title,
-                                                        color = Color.White,
-                                                        fontSize = 12.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                    Spacer(modifier = Modifier.height(2.dp))
-                                                    Text(
-                                                        text = "${shortItem.viewCount} views",
-                                                        color = Color.White.copy(alpha = 0.8f),
-                                                        fontSize = 10.sp
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(16.dp))
-                                HorizontalDivider(
-                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
-                                    thickness = 4.dp
-                                )
-                            }
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            items(shorts, key = { it.id }) { short ->
+                Card(
+                    modifier = Modifier
+                        .width(140.dp)
+                        .height(240.dp)
+                        .clickable { onShortClick(short) },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        AsyncImage(
+                            model = short.thumbnailUri.ifBlank { short.localUri },
+                            contentDescription = short.title,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .background(Color.Black.copy(alpha = 0.6f))
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                text = short.title,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

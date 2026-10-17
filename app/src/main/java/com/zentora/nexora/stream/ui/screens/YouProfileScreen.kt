@@ -65,7 +65,9 @@ fun YouProfileScreen(
     repository: NexoraStreamRepository,
     onVideoClick: (String) -> Unit,
     onViewChannel: (String) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onNotificationClick: () -> Unit = {},
+    onManageVideos: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -164,7 +166,7 @@ fun YouProfileScreen(
                     IconButton(onClick = {}) {
                         Icon(Icons.Outlined.Cast, contentDescription = "Cast", tint = Color.White)
                     }
-                    IconButton(onClick = {}) {
+                    IconButton(onClick = onNotificationClick, modifier = Modifier.testTag("you_notifications_button")) {
                         Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = Color.White)
                     }
                     IconButton(onClick = {}) {
@@ -477,7 +479,7 @@ fun YouProfileScreen(
                         subtitle = "${myVideos.size} videos",
                         iconBadge = Icons.Filled.VideoLibrary,
                         cardColor = Color(0xFF142B24),
-                        onClick = { onViewChannel("ch_zentora_core") }
+                        onClick = onManageVideos
                     )
 
                     PlaylistStackedRowItem(

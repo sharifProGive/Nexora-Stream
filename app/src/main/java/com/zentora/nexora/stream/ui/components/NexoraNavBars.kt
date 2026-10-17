@@ -241,42 +241,19 @@ fun NexoraStreamBottomNavBar(
             )
         )
 
-        // 5. You Tab (Circular avatar with ring border like screenshot 14-21-38)
-        val isYouSelected = currentRoute == "you" || currentRoute == "library"
+        // 5. Friends Tab (Pillar 4: Private Friends Enclave & Dual Identity)
+        val isFriendsSelected = currentRoute in listOf("friends_gateway", "friends", "chat_detail")
         NavigationBarItem(
             icon = {
-                Box(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .border(
-                            width = if (isYouSelected) 1.5.dp else 1.dp,
-                            color = if (isYouSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
-                            shape = CircleShape
-                        )
-                ) {
-                    if (userAvatarUri.isNotBlank()) {
-                        AsyncImage(
-                            model = userAvatarUri,
-                            contentDescription = "You Profile",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(NexoraZentoraBlue),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("Z", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                        }
-                    }
-                }
+                Icon(
+                    imageVector = if (isFriendsSelected) Icons.Filled.People else Icons.Outlined.People,
+                    contentDescription = "Friends",
+                    modifier = Modifier.size(24.dp)
+                )
             },
-            label = { Text("You", fontSize = 10.sp, fontWeight = if (isYouSelected) FontWeight.Bold else FontWeight.Normal) },
-            selected = isYouSelected,
-            onClick = { onNavigate("you") },
+            label = { Text("Friends", fontSize = 10.sp, fontWeight = if (isFriendsSelected) FontWeight.Bold else FontWeight.Normal) },
+            selected = isFriendsSelected,
+            onClick = { onNavigate("friends_gateway") },
             colors = NavigationBarItemDefaults.colors(
                 selectedIconColor = MaterialTheme.colorScheme.onSurface,
                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,

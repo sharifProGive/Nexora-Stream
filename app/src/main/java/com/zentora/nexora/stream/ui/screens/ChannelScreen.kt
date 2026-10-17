@@ -61,7 +61,8 @@ fun ChannelScreen(
     channelId: String,
     repository: NexoraStreamRepository,
     onBack: () -> Unit,
-    onVideoClick: (String) -> Unit
+    onVideoClick: (String) -> Unit,
+    onManageVideos: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -264,10 +265,11 @@ fun ChannelScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             FilledTonalButton(
-                                onClick = {},
+                                onClick = onManageVideos,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(38.dp),
+                                    .height(38.dp)
+                                    .testTag("manage_videos_button"),
                                 shape = RoundedCornerShape(19.dp),
                                 colors = ButtonDefaults.filledTonalButtonColors(
                                     containerColor = Color(0xFF272727),
@@ -411,7 +413,7 @@ fun ChannelScreen(
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Icon(Icons.Filled.VideoLibrary, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(48.dp))
                                     Spacer(modifier = Modifier.height(10.dp))
-                                    Text("No videos uploaded yet", fontWeight = FontWeight.Bold)
+                                    Text("This channel has no videos yet", fontWeight = FontWeight.Bold)
                                     Text("Upload videos in Studio to see them here", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }

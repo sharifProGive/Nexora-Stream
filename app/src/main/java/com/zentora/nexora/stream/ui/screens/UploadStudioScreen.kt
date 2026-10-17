@@ -58,7 +58,10 @@ import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.NexoraNetworkClient
 import com.zentora.nexora.stream.engine.Vault1StorageEngine
+import com.zentora.nexora.stream.ui.components.CustomMediaPicker
+import com.zentora.nexora.stream.ui.components.LocalDeviceVideoItem
 import com.zentora.nexora.stream.ui.components.formatMsToTime
+import com.zentora.nexora.stream.ui.components.queryDeviceVideos
 import com.zentora.nexora.stream.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -74,60 +77,6 @@ enum class StudioPillMode(val label: String) {
     POST("Post")
 }
 
-data class LocalDeviceVideoItem(
-    val id: Long,
-    val uri: Uri,
-    val durationMs: Long,
-    val displayName: String
-)
-
-/**
- * Loads real device videos from MediaStore (MediaStore.Video.Media.EXTERNAL_CONTENT_URI) via ContentResolver.
- */
-fun queryDeviceVideos(context: Context): List<LocalDeviceVideoItem> {
-    val videos = mutableListOf<LocalDeviceVideoItem>()
-    val projection = arrayOf(
-        MediaStore.Video.Media._ID,
-        MediaStore.Video.Media.DURATION,
-        MediaStore.Video.Media.DISPLAY_NAME
-    )
-    val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
-
-    try {
-        val cursor = context.contentResolver.query(
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            null,
-            null,
-            sortOrder
-        )
-
-        cursor?.use { c ->
-            val idColumn = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-            val durationColumn = c.getColumnIndex(MediaStore.Video.Media.DURATION)
-            val nameColumn = c.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
-
-            while (c.moveToNext()) {
-                val id = c.getLong(idColumn)
-                val duration = if (durationColumn != -1) c.getLong(durationColumn) else 0L
-                val name = if (nameColumn != -1) c.getString(nameColumn) ?: "Video" else "Video"
-                val contentUri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-
-                videos.add(
-                    LocalDeviceVideoItem(
-                        id = id,
-                        uri = contentUri,
-                        durationMs = duration,
-                        displayName = name
-                    )
-                )
-            }
-        }
-    } catch (_: Exception) {
-    }
-    return videos
-}
-
 /**
  * 4-in-1 Unified Creator Studio matching exact YouTube screenshots:
  * - TASK 1: Automatic In-App 3x3 Video Gallery Grid (Video Tab) via MediaStore.
@@ -138,7 +87,9 @@ fun queryDeviceVideos(context: Context): List<LocalDeviceVideoItem> {
 @Composable
 fun UploadStudioScreen(
     repository: NexoraStreamRepository,
+    uploadViewModel: UploadStudioViewModel? = null,
     onUploadComplete: () -> Unit,
+    onNavigateToManageVideos: (() -> Unit)? = null,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -275,8 +226,8 @@ fun UploadStudioScreen(
     var notifySubscribers by remember { mutableStateOf(true) }
     var showLicenseModal by remember { mutableStateOf(false) }
 
-    var isUploading by remember { mutableStateOf(false) }
-    var uploadProgress by remember { mutableFloatStateOf(0f) }
+    val activeUploadViewModel = uploadViewModel ?: remember { UploadStudioViewModel(repository) }
+    val uploadUiState by activeUploadViewModel.uploadState.collectAsState()
     var showMoreDetails by remember { mutableStateOf(false) }
     var showDescriptionModal by remember { mutableStateOf(false) }
 
@@ -476,76 +427,43 @@ fun UploadStudioScreen(
                     onToggleShowMore = { showMoreDetails = !showMoreDetails },
                     onEditThumbnail = { studioStage = 3 },
                     onBack = { studioStage = 0 },
-                    isUploading = isUploading,
-                    uploadProgress = uploadProgress,
+                    isUploading = uploadUiState.isUploading,
+                    uploadProgress = uploadUiState.progress,
+                    uploadPhase = uploadUiState.phaseText,
+                    uploadTimeRemaining = uploadUiState.timeRemainingText,
                     onUpload = {
                         val videoFile = persistedVideoFile
                         if (videoFile != null && videoFile.exists()) {
-                            isUploading = true
-                            uploadProgress = 0.15f
-
-                            scope.launch {
-                                val thumbFile = if (activeThumb != null) File(activeThumb) else null
-
-                                // 1. Real OkHttp MultipartBody upload to Vault 4 Blobstore
-                                uploadProgress = 0.45f
-                                NexoraNetworkClient.uploadToVault4Blobstore(
-                                    videoFile = videoFile,
-                                    thumbnailFile = thumbFile,
-                                    title = if (title.isNotBlank()) title.trim() else "My Video",
-                                    description = description.trim(),
-                                    category = category,
-                                    tags = tagsInput.trim(),
-                                    authorChannelId = "ch_zentora_core",
-                                    isShort = isShortMode,
-                                    visibility = visibility,
-                                    isMadeForKids = isMadeForKids,
-                                    isAgeRestricted = isAgeRestricted,
-                                    location = location,
-                                    shortsRemixing = shortsRemixing,
-                                    commentsModeration = commentsModeration,
-                                    showLikesCount = showLikesCount,
-                                    containsPaidPromotion = containsPaidPromotion,
-                                    videoLanguage = videoLanguage,
-                                    licenseType = licenseType,
-                                    allowEmbedding = allowEmbedding,
-                                    notifySubscribers = notifySubscribers
-                                )
-
-                                uploadProgress = 0.85f
-                                delay(200)
-
-                                // 2. Room DB (Vault 1) + Vault 3 Registry + Vault 5 Grand Master Lock
-                                repository.uploadVideo(
-                                    title = if (title.isNotBlank()) title.trim() else "My Video",
-                                    description = description.trim(),
-                                    category = category,
-                                    tags = tagsInput.trim(),
-                                    localUri = videoFile.absolutePath,
-                                    thumbnailUri = activeThumb ?: "",
-                                    duration = mediaDurationMs,
-                                    visibility = visibility,
-                                    isMadeForKids = isMadeForKids,
-                                    isAgeRestricted = isAgeRestricted,
-                                    location = location,
-                                    shortsRemixing = shortsRemixing,
-                                    commentsModeration = commentsModeration,
-                                    showLikesCount = showLikesCount,
-                                    containsPaidPromotion = containsPaidPromotion,
-                                    videoLanguage = videoLanguage,
-                                    licenseType = licenseType,
-                                    allowEmbedding = allowEmbedding,
-                                    notifySubscribers = notifySubscribers
-                                )
-
-                                uploadProgress = 1.0f
-                                delay(150)
-                                isUploading = false
-
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(context, "Video uploaded successfully!", Toast.LENGTH_LONG).show()
-                                    onUploadComplete()
+                            activeUploadViewModel.startChunkedUpload(
+                                videoFile = videoFile,
+                                thumbnailPath = activeThumb,
+                                title = if (title.isNotBlank()) title.trim() else "My Video",
+                                description = description.trim(),
+                                category = category,
+                                tags = tagsInput.trim(),
+                                visibility = visibility,
+                                isShort = isShortMode,
+                                durationMs = mediaDurationMs,
+                                isMadeForKids = isMadeForKids,
+                                isAgeRestricted = isAgeRestricted,
+                                location = location,
+                                shortsRemixing = shortsRemixing,
+                                commentsModeration = commentsModeration,
+                                showLikesCount = showLikesCount,
+                                containsPaidPromotion = containsPaidPromotion,
+                                videoLanguage = videoLanguage,
+                                licenseType = licenseType,
+                                allowEmbedding = allowEmbedding,
+                                notifySubscribers = notifySubscribers,
+                                onSuccess = {
+                                    Toast.makeText(context, "Video processed successfully!", Toast.LENGTH_SHORT).show()
                                 }
+                            )
+                            // Immediate redirect to Manage Videos / Studio Tracker as requested
+                            if (onNavigateToManageVideos != null) {
+                                onNavigateToManageVideos()
+                            } else {
+                                onUploadComplete()
                             }
                         }
                     }
@@ -1162,141 +1080,11 @@ fun VideoGalleryPickerView(
     onClose: () -> Unit,
     onSelectVideo: (LocalDeviceVideoItem) -> Unit
 ) {
-    var showDropdownMenu by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0F0F0F))
-            .padding(top = 16.dp)
-    ) {
-        // Top Bar: (X) Close + "Upload from gallery" + "Videos ⌵"
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-                text = "Upload from gallery",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                color = Color.White
-            )
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Dropdown menu chip: "Videos ⌵"
-            Box {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFF222222),
-                    modifier = Modifier.clickable { showDropdownMenu = true }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Videos", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                    }
-                }
-
-                DropdownMenu(
-                    expanded = showDropdownMenu,
-                    onDismissRequest = { showDropdownMenu = false },
-                    modifier = Modifier.background(Color(0xFF1E1E1E))
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Videos (${videos.size})", color = Color.White) },
-                        onClick = { showDropdownMenu = false }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Recent Media", color = Color.LightGray) },
-                        onClick = { showDropdownMenu = false }
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // In-App Edge-to-Edge 3-column square grid
-        if (videos.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 100.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Filled.VideoLibrary,
-                        contentDescription = null,
-                        tint = Color.DarkGray,
-                        modifier = Modifier.size(64.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "No videos detected on device storage",
-                        color = Color.Gray,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Grant media permissions to list your gallery videos",
-                        color = Color.DarkGray,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 1.dp),
-                contentPadding = PaddingValues(bottom = 100.dp)
-            ) {
-                items(videos, key = { it.id }) { videoItem ->
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .padding(1.5.dp)
-                            .background(Color(0xFF222222))
-                            .clickable { onSelectVideo(videoItem) }
-                    ) {
-                        AsyncImage(
-                            model = videoItem.uri,
-                            contentDescription = videoItem.displayName,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-
-                        // Duration pill badge on bottom-right corner (e.g. "0:10", "1:45:12")
-                        Surface(
-                            shape = RoundedCornerShape(3.dp),
-                            color = Color.Black.copy(alpha = 0.85f),
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(4.dp)
-                        ) {
-                            Text(
-                                text = formatMsToTime(videoItem.durationMs),
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
+    CustomMediaPicker(
+        videos = videos,
+        onClose = onClose,
+        onSelectVideo = onSelectVideo
+    )
 }
 
 // =================================================================================
@@ -1965,6 +1753,8 @@ fun AddDetailsMetadataView(
     onBack: () -> Unit,
     isUploading: Boolean,
     uploadProgress: Float,
+    uploadPhase: String = "",
+    uploadTimeRemaining: String = "",
     onUpload: () -> Unit
 ) {
     Scaffold(
@@ -2242,8 +2032,12 @@ fun AddDetailsMetadataView(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Uploading video…", fontSize = 12.sp, color = Color.White)
+                        Text(if (uploadPhase.isNotBlank()) uploadPhase else "Uploading video…", fontSize = 12.sp, color = Color.White)
                         Text("${(uploadProgress * 100).toInt()}%", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = NexoraRed)
+                    }
+                    if (uploadTimeRemaining.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(uploadTimeRemaining, fontSize = 10.sp, color = Color.Gray)
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     LinearProgressIndicator(

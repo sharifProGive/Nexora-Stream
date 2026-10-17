@@ -16,9 +16,12 @@ import com.zentora.nexora.stream.data.database.entities.*
         ChannelEntity::class,
         HistoryEntity::class,
         NotesEntity::class,
-        CommunityPostEntity::class
+        CommunityPostEntity::class,
+        PrivateFriendProfileEntity::class,
+        PrivateFriendEntity::class,
+        PrivateChatMessageEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class NexoraDatabase : RoomDatabase() {
