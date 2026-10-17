@@ -20,8 +20,8 @@ import kotlinx.coroutines.launch
  * NexoraNavHost coordinates the primary application navigation graph:
  * - Dedicated Top Notification Bell routing to "notifications_screen".
  * - Post-upload redirect to "manage_videos" Studio tracker.
- * - Pillar 4: 5th Tab Friends Gateway with dual-identity enclave, WhatsApp-style chat, and call launcher.
- * - Pillar 3: Hardware phone calling screen with WebRTC encrypted stream controls.
+ * - Clean 5-tab Bottom Navigation (Home, Shorts, Upload, Subscriptions, You).
+ * - Friends Gateway linked directly from YouProfileScreen.
  */
 @Composable
 fun NexoraNavHost(
@@ -128,7 +128,7 @@ fun NexoraNavHost(
                     currentRoute = if (activeChatHandle != null) "chat_detail" else "friends_gateway"
                 }
                 "friends_gateway", "friends" -> {
-                    currentRoute = "home"
+                    currentRoute = "you" // ফায়ার হবে 'You' স্ক্রিনে ফিরে আসার জন্য
                 }
                 "you" -> {
                     currentRoute = "home"
@@ -138,8 +138,10 @@ fun NexoraNavHost(
         }
     }
 
-    val showTopBar = currentRoute in listOf("home", "subscriptions", "friends_gateway", "you")
-    val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "friends_gateway")
+    // TopBar & BottomBar visibility logic
+    val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
+    // ৫টি মূল স্ক্রিনেই যেন বটম বার সর্বদা দৃশ্যমান থাকে
+    val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -192,7 +194,7 @@ fun NexoraNavHost(
                         }
                     )
                 }
-                "upload" -> {
+                "upload", "create" -> {
                     UploadStudioScreen(
                         repository = repository,
                         uploadViewModel = uploadViewModel,
