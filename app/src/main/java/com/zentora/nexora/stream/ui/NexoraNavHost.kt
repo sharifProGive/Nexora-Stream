@@ -97,7 +97,7 @@ fun NexoraNavHost(
         onActiveVideoChange(selectedVideoId)
     }
 
-    // Handle back press on sub-routes
+    // Handle back press on sub-routes with absolute routing safety
     if (currentRoute != "home") {
         BackHandler {
             when (currentRoute) {
@@ -146,7 +146,6 @@ fun NexoraNavHost(
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        // ইউটিউবের মতো এজ-টু-এজ ডিসপ্লে এবং ইনসেটস হ্যান্ডলিং
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (showTopBar) {
@@ -161,7 +160,6 @@ fun NexoraNavHost(
         },
         bottomBar = {
             if (showBottomBar) {
-                // ৩-বাটন নেভিগেশন বারের সাথে ওভারল্যাপ রোধ করতে navigationBarsPadding যুক্ত করা হয়েছে
                 Box(modifier = Modifier.navigationBarsPadding()) {
                     NexoraStreamBottomNavBar(
                         currentRoute = currentRoute,
