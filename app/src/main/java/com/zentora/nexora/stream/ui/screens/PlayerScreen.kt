@@ -15,7 +15,9 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -53,7 +55,6 @@ import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraDrm
-import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.NexoraLinkManager
 import com.zentora.nexora.stream.ui.components.*
 import com.zentora.nexora.stream.ui.theme.*
@@ -99,7 +100,6 @@ fun PlayerScreen(
     val allChannels by repository.allChannels.collectAsState(initial = emptyList())
     val authorChannel = allChannels.find { it.channelId == currentVideo?.authorChannelId }
 
-    // ExoPlayer state
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var totalDurationMs by remember { mutableLongStateOf(1L) }
@@ -107,26 +107,21 @@ fun PlayerScreen(
     var isBuffering by remember { mutableStateOf(true) }
     var isFullscreen by remember { mutableStateOf(false) }
 
-    // Zentora 5th Vault Dynamic Ad Engine State
     var isAdActive by remember { mutableStateOf(false) }
     var currentAd by remember { mutableStateOf<NexoraAdData?>(null) }
     var adCountdownRemaining by remember { mutableIntStateOf(9) }
     var isAdSkippable by remember { mutableStateOf(false) }
 
-    // Feature 9: One-Tap Screen Touch Lock
     var isTouchLocked by remember { mutableStateOf(false) }
 
-    // Feature 8: A-B Repeat Loop tool
     var isLoopActive by remember { mutableStateOf(false) }
     var loopStartMs by remember { mutableStateOf<Long?>(null) }
     var loopEndMs by remember { mutableStateOf<Long?>(null) }
 
-    // Feature 10: Gestures HUD
     var brightnessOverlay by remember { mutableStateOf<Float?>(null) }
     var volumeOverlay by remember { mutableStateOf<Int?>(null) }
     var doubleTapFeedback by remember { mutableStateOf<String?>(null) }
 
-    // Modals
     var showAudioTrackDialog by remember { mutableStateOf(false) }
     var currentAudioTrack by remember { mutableStateOf("en") }
     var showNotesModal by remember { mutableStateOf(false) }
@@ -135,12 +130,10 @@ fun PlayerScreen(
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val maxVolume = remember { maxOf(1, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)) }
 
-    // Chapter markers (Feature 11)
     val chapters = remember(currentVideo?.chapterMarkersJson) {
         parseChapterMarkers(currentVideo?.chapterMarkersJson ?: "[]")
     }
 
-    // Media3 ExoPlayer instance
     val exoPlayer = remember {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(15_000, 50_000, 1_000, 2_500)
@@ -155,7 +148,6 @@ fun PlayerScreen(
             }
     }
 
-    // Function to cleanly switch from Ad to Main Target Video
     val playMainVideo: () -> Unit = {
         isAdActive = false
         currentAd = null
@@ -219,7 +211,6 @@ fun PlayerScreen(
         }
     }
 
-    // Pre-Roll Ad Check & Launch Engine (Supports 10s Non-Skippable & 15s-90s Skippable in 9s)
     LaunchedEffect(currentVideo?.id) {
         if (currentVideo == null) return@LaunchedEffect
 
@@ -268,7 +259,6 @@ fun PlayerScreen(
             }
         }
 
-        // Fail-safe fallback ad so ads work even when Render server sleeps
         val finalAd = fetchedAd ?: NexoraAdData(
             adId = "ZT-AD-FALLBACK",
             title = "Official Partner Promotion",
@@ -292,7 +282,6 @@ fun PlayerScreen(
         exoPlayer.play()
     }
 
-    // Ad Countdown Timer Logic (1-second tick)
     LaunchedEffect(isAdActive, adCountdownRemaining, currentAd) {
         if (isAdActive && currentAd != null) {
             if (adCountdownRemaining > 0) {
@@ -309,7 +298,6 @@ fun PlayerScreen(
         }
     }
 
-    // Enforce 90-second maximum limit & periodic progress update
     LaunchedEffect(isPlaying, isAdActive, isLoopActive, loopStartMs, loopEndMs) {
         while (isPlaying) {
             val pos = maxOf(0L, exoPlayer.currentPosition)
@@ -333,7 +321,6 @@ fun PlayerScreen(
         }
     }
 
-    // Auto-hide controls timer
     LaunchedEffect(isControlsVisible, isPlaying, isTouchLocked, isAdActive) {
         if (isControlsVisible && isPlaying && !isTouchLocked && !isAdActive) {
             delay(3500L)
@@ -457,7 +444,6 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Dedicated Ad Engine UI Overlay
                 if (isAdActive && currentAd != null) {
                     Box(
                         modifier = Modifier
@@ -620,7 +606,8 @@ fun PlayerScreen(
                     }
                 }
 
-                AnimatedVisibility(
+                // Explicit receiver fix for AnimatedVisibility inside Box scope
+                androidx.compose.animation.AnimatedVisibility(
                     visible = isControlsVisible && !isTouchLocked && !isAdActive,
                     enter = fadeIn(),
                     exit = fadeOut(),
