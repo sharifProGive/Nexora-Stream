@@ -16,6 +16,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 
 class NexoraStreamRepository(private val context: Context) {
@@ -174,6 +180,69 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     /**
+     * Permanent Cross-Device & Reinstall User Data Sync (Render Cloud Backup)
+     */
+    suspend fun saveUserDataToCloud(userGoogleEmail: String, phoneNumber: String, billingInfo: String) {
+        withContext(Dispatchers.IO) {
+            var connection: HttpURLConnection? = null
+            try {
+                val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/user/save-profile")
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                }
+
+                val jsonPayload = JSONObject().apply {
+                    put("email", userGoogleEmail)
+                    put("phoneNumber", phoneNumber)
+                    put("billingInfo", billingInfo)
+                }
+
+                connection.outputStream.use { os ->
+                    os.write(jsonPayload.toString().toByteArray(Charsets.UTF_8))
+                }
+
+                connection.responseCode
+            } catch (_: Exception) {
+            } finally {
+                connection?.disconnect()
+            }
+        }
+    }
+
+    suspend fun restoreUserDataFromCloud(userGoogleEmail: String, onDataRestored: (String, String) -> Unit) {
+        withContext(Dispatchers.IO) {
+            var connection: HttpURLConnection? = null
+            try {
+                val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/user/get-profile?email=$userGoogleEmail")
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                }
+
+                if (connection.responseCode == 200) {
+                    val respText = BufferedReader(InputStreamReader(connection.inputStream)).use { it.readText() }
+                    val json = JSONObject(respText)
+                    if (json.optBoolean("success", false)) {
+                        val phone = json.optString("phoneNumber", "")
+                        val billing = json.optString("billingInfo", "")
+                        withContext(Dispatchers.Main) {
+                            onDataRestored(phone, billing)
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                connection?.disconnect()
+            }
+        }
+    }
+
+    /**
      * Global Search: Query Central Registry (Vault 2) and merge into local Room DB.
      */
     suspend fun searchGlobalVaults(query: String) {
@@ -219,7 +288,6 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     private suspend fun seedInitialCoreDataIfNeeded() {
-        // Seed official Zentora Creator Channel with zero subscribers (Strict Rule 2)
         val existingChannel = dao.getChannelByIdSync("ch_zentora_core")
         if (existingChannel == null) {
             val zentoraChannel = ChannelEntity(
@@ -227,7 +295,7 @@ class NexoraStreamRepository(private val context: Context) {
                 channelName = "Zentora CLC",
                 avatarUri = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80",
                 bannerUri = "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80",
-                subscriberCount = 0L, // Initialized at 0 as required
+                subscriberCount = 0L,
                 isSubscribed = false,
                 creatorLevel = "Rising Creator",
                 hasZentoraBadge = true,
@@ -237,7 +305,6 @@ class NexoraStreamRepository(private val context: Context) {
             dao.insertChannel(zentoraChannel)
         }
 
-        // Secondary creator channel for Collab features
         val secondaryChannel = dao.getChannelByIdSync("ch_blender_open")
         if (secondaryChannel == null) {
             val collabChannel = ChannelEntity(
@@ -254,7 +321,6 @@ class NexoraStreamRepository(private val context: Context) {
             )
             dao.insertChannel(collabChannel)
         }
-
     }
 
     // ==================== VIDEO METHODS ====================
@@ -271,7 +337,6 @@ class NexoraStreamRepository(private val context: Context) {
                 retentionScore = retention
             )
         )
-        // NCP Protocol: Asynchronously dispatch real-time view to Central Vaults
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
@@ -282,7 +347,6 @@ class NexoraStreamRepository(private val context: Context) {
                     )
                 )
             } catch (_: Exception) {
-                // Room DB Vault 1 preserves local views when offline
             }
         }
     }
@@ -341,7 +405,6 @@ class NexoraStreamRepository(private val context: Context) {
                 sparksReceived = 0L
             )
         )
-        // NCP Protocol: Register uploaded video to Vault 3 and lock into Vault 5 Grand Master
         scope.launch {
             try {
                 val session = NexoraIdManager.getSession()
@@ -372,7 +435,6 @@ class NexoraStreamRepository(private val context: Context) {
                     )
                 )
             } catch (_: Exception) {
-                // Offline fallback: Persisted locally in Vault 1 Room DB
             }
         }
         return newVideo
@@ -420,7 +482,6 @@ class NexoraStreamRepository(private val context: Context) {
             )
         )
 
-        // NCP Protocol: Asynchronously dispatch like update to Vault 2 and Vault 5
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
@@ -431,7 +492,6 @@ class NexoraStreamRepository(private val context: Context) {
                     )
                 )
             } catch (_: Exception) {
-                // Room DB Vault 1 preserves local interaction state
             }
         }
     }
@@ -460,7 +520,6 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun sendSparks(videoId: String, sparks: Long) {
         dao.addSparks(videoId, sparks)
-        // NCP Protocol: Asynchronously dispatch spark count to Vault 2 and Vault 5
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
@@ -471,7 +530,6 @@ class NexoraStreamRepository(private val context: Context) {
                     )
                 )
             } catch (_: Exception) {
-                // Local Vault 1 preserves sparks count
             }
         }
     }
@@ -495,7 +553,6 @@ class NexoraStreamRepository(private val context: Context) {
         )
         dao.insertComment(comment)
 
-        // NCP Global Sync: Dispatch comment to Vault 2 & Vault 5
         scope.launch {
             try {
                 val session = NexoraIdManager.getSession()
@@ -510,7 +567,6 @@ class NexoraStreamRepository(private val context: Context) {
                     )
                 )
             } catch (_: Exception) {
-                // Preserved in local Room DB Vault 1
             }
         }
         return isSafe
