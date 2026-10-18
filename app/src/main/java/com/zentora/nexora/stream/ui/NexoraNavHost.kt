@@ -3,7 +3,9 @@ package com.zentora.nexora.stream.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
@@ -128,7 +130,7 @@ fun NexoraNavHost(
                     currentRoute = if (activeChatHandle != null) "chat_detail" else "friends_gateway"
                 }
                 "friends_gateway", "friends" -> {
-                    currentRoute = "you" // ফায়ার হবে 'You' স্ক্রিনে ফিরে আসার জন্য
+                    currentRoute = "you"
                 }
                 "you" -> {
                     currentRoute = "home"
@@ -140,11 +142,12 @@ fun NexoraNavHost(
 
     // TopBar & BottomBar visibility logic
     val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
-    // ৫টি মূল স্ক্রিনেই যেন বটম বার সর্বদা দৃশ্যমান থাকে
     val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        // ইউটিউবের মতো এজ-টু-এজ ডিসপ্লে এবং ইনসেটস হ্যান্ডলিং
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (showTopBar) {
                 NexoraStreamTopAppBar(
@@ -158,11 +161,14 @@ fun NexoraNavHost(
         },
         bottomBar = {
             if (showBottomBar) {
-                NexoraStreamBottomNavBar(
-                    currentRoute = currentRoute,
-                    userAvatarUri = userSession.avatarUri,
-                    onNavigate = { route -> currentRoute = route }
-                )
+                // ৩-বাটন নেভিগেশন বারের সাথে ওভারল্যাপ রোধ করতে navigationBarsPadding যুক্ত করা হয়েছে
+                Box(modifier = Modifier.navigationBarsPadding()) {
+                    NexoraStreamBottomNavBar(
+                        currentRoute = currentRoute,
+                        userAvatarUri = userSession.avatarUri,
+                        onNavigate = { route -> currentRoute = route }
+                    )
+                }
             }
         }
     ) { innerPadding ->
