@@ -54,6 +54,10 @@ class NexoraStreamRepository(private val context: Context) {
             seedInitialCoreDataIfNeeded()
             syncFeedFromCentralVaults()
             restoreAccountFromCentralVaults()
+            val session = NexoraIdManager.getSession()
+            if (session.email.isNotBlank()) {
+                restoreUserDataFromCloud(session.email) { _, _ -> }
+            }
         }
     }
 
@@ -137,7 +141,6 @@ class NexoraStreamRepository(private val context: Context) {
             val response = NexoraNetworkClient.apiService.restoreUserProfile(session.nexoraId)
             if (response.isSuccessful && response.body() != null) {
                 val profile = response.body()!!
-                // Update local channel
                 val channel = ChannelEntity(
                     channelId = "ch_zentora_core",
                     channelName = if (profile.username.isNotBlank()) profile.username else "Zentora CLC",
@@ -151,7 +154,6 @@ class NexoraStreamRepository(private val context: Context) {
                 )
                 dao.insertChannel(channel)
 
-                // Restore user's uploaded videos
                 for (item in profile.uploadedVideos) {
                     val video = VideoEntity(
                         id = item.id,
@@ -180,7 +182,7 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     /**
-     * Permanent Cross-Device & Reinstall User Data Sync (Render Cloud Backup)
+     * Permanent Cross-Device & Reinstall User Data Sync (Render Cloud Backup Linked)
      */
     suspend fun saveUserDataToCloud(userGoogleEmail: String, phoneNumber: String, billingInfo: String) {
         withContext(Dispatchers.IO) {
@@ -273,7 +275,6 @@ class NexoraStreamRepository(private val context: Context) {
                     }
                 }
             } catch (_: Exception) {
-                // Offline fallback relies on local Room database search
             }
         }
     }
