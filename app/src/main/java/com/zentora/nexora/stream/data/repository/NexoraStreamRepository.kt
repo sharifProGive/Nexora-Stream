@@ -45,7 +45,7 @@ class NexoraStreamRepository(private val context: Context) {
     val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
 
     private val _masterPin = MutableStateFlow("1234") // Default master PIN
-    masterPin: StateFlow<String> = _masterPin.asStateFlow() // Fixed type declaration syntax
+    val masterPin: StateFlow<String> = _masterPin.asStateFlow()
 
     private val _isDataSaver = MutableStateFlow(false)
     val isDataSaver: StateFlow<Boolean> = _isDataSaver.asStateFlow()
@@ -56,7 +56,7 @@ class NexoraStreamRepository(private val context: Context) {
             syncFeedFromCentralVaults()
             restoreAccountFromCentralVaults()
             
-            // অ্যাকাউন্ট-বেসড অটো-রিস্টোর ট্রিগার (ইউজার রিইনস্টল করলে বা নতুন ফোনে লগইন করলে কাজ করবে)
+            // অ্যাকাউন্ট-বেসড অটো-রিস্টোর ট্রিগার
             val session = NexoraIdManager.getSession()
             if (session.email.isNotBlank()) {
                 restoreUserDataFromCloud(session.email) { _, _ ->
@@ -66,9 +66,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * DUAL-SYNC LOGIC (Room DB Vault 1 <-> Central Vaults)
-     */
     suspend fun syncFeedFromCentralVaults(): Result<Int> {
         return runCatching {
             val response = NexoraNetworkClient.apiService.getFeed()
@@ -180,10 +177,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * POST /api/v1/user/save-profile
-     * ইউজার যখনই অ্যাপে কিছু করবে বা প্রফাইল আপডেট করবে, সাথে সাথে এই রুটে ইউজারের ইমেইল ও ডেটা পোস্ট হয়ে ক্লাউড ভল্টে সেভ হয়ে যাবে।
-     */
     suspend fun saveUserDataToCloud(userGoogleEmail: String, phoneNumber: String, billingInfo: String) {
         withContext(Dispatchers.IO) {
             var connection: HttpURLConnection? = null
@@ -221,10 +214,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * GET /api/v1/user/get-profile?email={user_email}
-     * ইউজার যখন অ্যাপে পুনরায় লগইন করবে বা অ্যাপ রিইনস্টল করবে, তখন এই রুট থেকে ওই ইমেইলের আন্ডারে থাকা সমস্ত ডেটা আবার অ্যাপে ফিরিয়ে আনবে।
-     */
     suspend fun restoreUserDataFromCloud(userGoogleEmail: String, onDataRestored: (String, String) -> Unit) {
         withContext(Dispatchers.IO) {
             var connection: HttpURLConnection? = null
@@ -261,10 +250,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * YouTube-Style Real-Time Auto-Save Engine:
-     * ইউজার অ্যাপে যখনই কোনো কাজ করবে (লাইক, হিস্ট্রি, অ্যাক্টিভিটি), তা সাথে সাথে ব্যাকগ্রাউন্ডে সার্ভারে সেভ হয়ে যাবে।
-     */
     fun syncUserActivityToCloud(actionType: String, targetId: String, metadataJson: String) {
         scope.launch {
             var connection: HttpURLConnection? = null
@@ -387,7 +372,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    // ==================== VIDEO METHODS ====================
     fun getVideo(id: String): Flow<VideoEntity?> = dao.getVideoById(id)
 
     suspend fun recordView(videoId: String, durationMs: Long, positionMs: Long) {
@@ -401,7 +385,6 @@ class NexoraStreamRepository(private val context: Context) {
                 retentionScore = retention
             )
         )
-        // রিয়েল-টাইম অটো-সেভ ট্রিগার
         syncUserActivityToCloud("WATCH_HISTORY", videoId, "{\"positionMs\": $positionMs, \"durationMs\": $durationMs}")
 
         scope.launch {
@@ -474,7 +457,6 @@ class NexoraStreamRepository(private val context: Context) {
             )
         )
         
-        // আপলোড করা ভিডিওর অটো-সেভ ট্রিগার
         syncUserActivityToCloud("UPLOAD_VIDEO", newVideo.id, "{\"title\": \"$title\"}")
 
         scope.launch {
@@ -541,7 +523,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.deleteHistoryById(id)
     }
 
-    // ==================== INTERACTIONS ====================
     fun getInteraction(videoId: String): Flow<InteractionEntity?> = dao.getInteraction(videoId)
 
     suspend fun toggleLike(videoId: String) {
@@ -560,7 +541,6 @@ class NexoraStreamRepository(private val context: Context) {
             )
         )
 
-        // লাইক অ্যাক্টিভিটি অটো-সেভ ট্রিগার
         syncUserActivityToCloud("TOGGLE_LIKE", videoId, "{\"isLiked\": $newLiked}")
 
         scope.launch {
@@ -619,7 +599,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    // ==================== COMMENTS & COMMUNITY SHIELD ====================
     fun getComments(videoId: String): Flow<List<CommentEntity>> = dao.getCommentsForVideo(videoId)
 
     suspend fun addComment(videoId: String, authorName: String, text: String): Boolean {
@@ -638,7 +617,6 @@ class NexoraStreamRepository(private val context: Context) {
         )
         dao.insertComment(comment)
 
-        // কমেন্ট অ্যাক্টিভিটি অটো-সেভ ট্রিগার
         syncUserActivityToCloud("ADD_COMMENT", videoId, "{\"commentId\": \"${comment.commentId}\"}")
 
         scope.launch {
@@ -667,7 +645,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateComment(comment.copy(isLikedByMe = newLiked, likeCount = newCount))
     }
 
-    // ==================== CHANNELS & CREATOR LEVEL ====================
     fun getChannel(channelId: String): Flow<ChannelEntity?> = dao.getChannelById(channelId)
 
     suspend fun toggleSubscribe(channelId: String) {
@@ -686,7 +663,6 @@ class NexoraStreamRepository(private val context: Context) {
         syncUserActivityToCloud("TOGGLE_SUBSCRIBE", channelId, "{\"subscribed\": $newSubscribed}")
     }
 
-    // ==================== NOTES & BOOKMARKS ====================
     fun getNotes(videoId: String): Flow<List<NotesEntity>> = dao.getNotesForVideo(videoId)
 
     suspend fun addNote(videoId: String, timestampMs: Long, text: String) {
@@ -704,7 +680,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.deleteNote(noteId)
     }
 
-    // ==================== COMMUNITY POSTS ====================
     suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
         val post = CommunityPostEntity(
             postId = "post_${UUID.randomUUID()}",
@@ -726,7 +701,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateCommunityPost(post.copy(isUpvotedByMe = newUpvoted, upvotes = newCount))
     }
 
-    // ==================== PARENTAL CONTROLS & SETTINGS ====================
     fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
         if (enteredPin == _masterPin.value) {
             _isKidsMode.value = enabled
@@ -759,7 +733,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.insertChannel(channel)
     }
 
-    // ==================== PRIVATE FRIEND ENCLAVE (PILLAR 4) ====================
     val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
 
     suspend fun getPrivateProfile(): PrivateFriendProfileEntity? = dao.getPrivateProfileSync()
@@ -836,7 +809,7 @@ class NexoraStreamRepository(private val context: Context) {
         @Volatile
         private var INSTANCE: NexoraStreamRepository? = null
 
-        fn getInstance(context: Context): NexoraStreamRepository { // Fixed function syntax typo if any, standard Kotlin fun used
+        fun getInstance(context: Context): NexoraStreamRepository {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: NexoraStreamRepository(context).also { INSTANCE = it }
             }
