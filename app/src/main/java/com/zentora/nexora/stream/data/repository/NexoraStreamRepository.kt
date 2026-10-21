@@ -2,6 +2,7 @@
 package com.zentora.nexora.stream.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.zentora.nexora.stream.data.database.NexoraDatabase
 import com.zentora.nexora.stream.data.database.entities.*
 import com.zentora.nexora.stream.engine.CommunityShield
@@ -54,17 +55,19 @@ class NexoraStreamRepository(private val context: Context) {
             seedInitialCoreDataIfNeeded()
             syncFeedFromCentralVaults()
             restoreAccountFromCentralVaults()
+            
+            // অ্যাকাউন্ট-বেসড অটো-রিস্টোর ট্রিগার (ইউজার রিইনস্টল করলে বা নতুন ফোনে লগইন করলে কাজ করবে)
             val session = NexoraIdManager.getSession()
             if (session.email.isNotBlank()) {
-                restoreUserDataFromCloud(session.email) { _, _ -> }
+                restoreUserDataFromCloud(session.email) { restoredPhone, restoredBilling ->
+                    Log.d("NexoraAccountSync", "SUCCESS: User account data auto-restored for ${session.email}")
+                }
             }
         }
     }
 
     /**
      * DUAL-SYNC LOGIC (Room DB Vault 1 <-> Central Vaults)
-     * When online, sync latest public feed from /api/v1/feed and upsert into local Room entities.
-     * When offline, local Room Database (Vault 1) continues serving all cached videos seamlessly.
      */
     suspend fun syncFeedFromCentralVaults(): Result<Int> {
         return runCatching {
@@ -111,11 +114,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Account Restoration:
-     * Upon reinstalling and signing into Nexora ID, the app restores the creator's
-     * uploaded videos, channel statistics, and metadata from the central vaults into local Vault 1.
-     */
     suspend fun registerUserSessionWithCentralVault() {
         scope.launch {
             try {
@@ -130,7 +128,8 @@ class NexoraStreamRepository(private val context: Context) {
                         zentoraAuthToken = session.zentoraAuthToken
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Register session error: ${e.message}")
             }
         }
     }
@@ -182,7 +181,8 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     /**
-     * Permanent Cross-Device & Reinstall User Data Sync (Render Cloud Backup Linked)
+     * POST /api/v1/user/save-profile
+     * ইউজার যখনই অ্যাপে কিছু করবে বা প্রফাইল আপডেট করবে, সাথে সাথে এই রুটে ইউজারের ইমেইল ও ডেটা পোস্ট হয়ে ক্লাউড ভল্টে সেভ হয়ে যাবে।
      */
     suspend fun saveUserDataToCloud(userGoogleEmail: String, phoneNumber: String, billingInfo: String) {
         withContext(Dispatchers.IO) {
@@ -193,8 +193,8 @@ class NexoraStreamRepository(private val context: Context) {
                     requestMethod = "POST"
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                    connectTimeout = 4000
-                    readTimeout = 4000
+                    connectTimeout = 8000
+                    readTimeout = 8000
                 }
 
                 val jsonPayload = JSONObject().apply {
@@ -207,14 +207,24 @@ class NexoraStreamRepository(private val context: Context) {
                     os.write(jsonPayload.toString().toByteArray(Charsets.UTF_8))
                 }
 
-                connection.responseCode
-            } catch (_: Exception) {
+                val responseCode = connection.responseCode
+                if (responseCode == 200 || responseCode == 201) {
+                    Log.d("NexoraAccountSync", "SUCCESS: User data posted to Render cloud vault!")
+                } else {
+                    Log.e("NexoraAccountSync", "FAILED: Server save profile response code: $responseCode")
+                }
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "CRITICAL ERROR in saveUserDataToCloud: ${e.message}", e)
             } finally {
                 connection?.disconnect()
             }
         }
     }
 
+    /**
+     * GET /api/v1/user/get-profile?email={user_email}
+     * ইউজার যখন অ্যাপে পুনরায় লগইন করবে বা অ্যাপ রিইনস্টল করবে, তখন এই রুট থেকে ওই ইমেইলের আন্ডারে থাকা সমস্ত ডেটা আবার অ্যাপে ফিরিয়ে আনবে।
+     */
     suspend fun restoreUserDataFromCloud(userGoogleEmail: String, onDataRestored: (String, String) -> Unit) {
         withContext(Dispatchers.IO) {
             var connection: HttpURLConnection? = null
@@ -222,11 +232,12 @@ class NexoraStreamRepository(private val context: Context) {
                 val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/user/get-profile?email=$userGoogleEmail")
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
-                    connectTimeout = 4000
-                    readTimeout = 4000
+                    connectTimeout = 8000
+                    readTimeout = 8000
                 }
 
-                if (connection.responseCode == 200) {
+                val responseCode = connection.responseCode
+                if (responseCode == 200) {
                     val respText = BufferedReader(InputStreamReader(connection.inputStream)).use { it.readText() }
                     val json = JSONObject(respText)
                     if (json.optBoolean("success", false)) {
@@ -235,18 +246,21 @@ class NexoraStreamRepository(private val context: Context) {
                         withContext(Dispatchers.Main) {
                             onDataRestored(phone, billing)
                         }
+                        Log.d("NexoraAccountSync", "SUCCESS: Profile data fetched & restored for $userGoogleEmail")
+                    } else {
+                        Log.e("NexoraAccountSync", "SERVER ERROR: Profile fetch returned success=false")
                     }
+                } else {
+                    Log.e("NexoraAccountSync", "FAILED: Get profile HTTP status: $responseCode")
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "CRITICAL ERROR in restoreUserDataFromCloud: ${e.message}", e)
             } finally {
                 connection?.disconnect()
             }
         }
     }
 
-    /**
-     * Global Search: Query Central Registry (Vault 2) and merge into local Room DB.
-     */
     suspend fun searchGlobalVaults(query: String) {
         if (query.isBlank()) return
         scope.launch {
@@ -274,7 +288,8 @@ class NexoraStreamRepository(private val context: Context) {
                         dao.insertVideo(video)
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Search error: ${e.message}")
             }
         }
     }
@@ -283,7 +298,8 @@ class NexoraStreamRepository(private val context: Context) {
         return try {
             val response = NexoraNetworkClient.apiService.auditVaults()
             if (response.isSuccessful) response.body() else null
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("NexoraAccountSync", "Audit integrity error: ${e.message}")
             null
         }
     }
@@ -300,7 +316,7 @@ class NexoraStreamRepository(private val context: Context) {
                 isSubscribed = false,
                 creatorLevel = "Rising Creator",
                 hasZentoraBadge = true,
-                description = "Official channel of Zentora CLC. Next-generation media systems, distributed software platforms, and audio-visual engineering.",
+                description = "Official channel of Zentora CLC. Next-generation media systems.",
                 joinedTimestamp = System.currentTimeMillis()
             )
             dao.insertChannel(zentoraChannel)
@@ -347,7 +363,8 @@ class NexoraStreamRepository(private val context: Context) {
                         nexoraId = NexoraIdManager.getSession().nexoraId
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Record view error: ${e.message}")
             }
         }
     }
@@ -409,7 +426,7 @@ class NexoraStreamRepository(private val context: Context) {
         scope.launch {
             try {
                 val session = NexoraIdManager.getSession()
-                NexoraNetworkClient.apiService.publishVideo(
+                val response = NexoraNetworkClient.apiService.publishVideo(
                     PublishVideoRequest(
                         videoId = newVideo.id,
                         title = title,
@@ -435,7 +452,13 @@ class NexoraStreamRepository(private val context: Context) {
                         notifySubscribers = notifySubscribers
                     )
                 )
-            } catch (_: Exception) {
+                if (response.isSuccessful) {
+                    Log.d("NexoraAccountSync", "SUCCESS: Video successfully synced to Central Vaults!")
+                } else {
+                    Log.e("NexoraAccountSync", "FAILED: Server rejected video upload with code: ${response.code()}")
+                }
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "CRITICAL ERROR during video cloud publish: ${e.message}", e)
             }
         }
         return newVideo
@@ -492,7 +515,8 @@ class NexoraStreamRepository(private val context: Context) {
                         nexoraId = NexoraIdManager.getSession().nexoraId
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Toggle like error: ${e.message}")
             }
         }
     }
@@ -530,7 +554,8 @@ class NexoraStreamRepository(private val context: Context) {
                         nexoraId = NexoraIdManager.getSession().nexoraId
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Send sparks error: ${e.message}")
             }
         }
     }
@@ -567,7 +592,8 @@ class NexoraStreamRepository(private val context: Context) {
                         timestamp = comment.timestamp
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Add comment error: ${e.message}")
             }
         }
         return isSafe
