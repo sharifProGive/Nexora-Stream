@@ -40,6 +40,7 @@ class NexoraStreamRepository(private val context: Context) {
 
     fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>> = dao.getVideosByAuthor(authorChannelId)
 
+    // Parental Controls & Data Settings State
     private val _isKidsMode = MutableStateFlow(false)
     val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
 
@@ -88,6 +89,19 @@ class NexoraStreamRepository(private val context: Context) {
                         premiereScheduledTimeMs = item.premiereScheduledTimeMs
                     )
                     dao.insertVideo(video)
+                    if (dao.getInteractionSync(item.id) == null) {
+                        dao.insertInteraction(
+                            InteractionEntity(
+                                videoId = item.id,
+                                likesCount = 0L,
+                                dislikesCount = 0L,
+                                isLikedByMe = false,
+                                isDislikedByMe = false,
+                                savedToWatchLater = false,
+                                sparksReceived = 0L
+                            )
+                        )
+                    }
                 }
                 feed.videos.size
             } else {
@@ -130,7 +144,6 @@ class NexoraStreamRepository(private val context: Context) {
                 connection.outputStream.use { os ->
                     os.write(jsonPayload.toString().toByteArray(Charsets.UTF_8))
                 }
-
                 connection.responseCode
             } catch (e: Exception) {
                 Log.e("NexoraAccountSync", "Error saving profile: ${e.message}")
@@ -170,9 +183,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    /**
-     * আপনার Zentora 6-Vault সার্ভারের সাথে ইন্টারঅ্যাকশন ও অ্যাক্টিভিটি সিঙ্ক করার মেকানিজম
-     */
     suspend fun recordView(videoId: String, durationMs: Long, positionMs: Long) {
         dao.incrementViewCount(videoId)
         dao.insertHistory(
@@ -191,6 +201,7 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
+    // Upload Video with all required parameters to resolve ViewModel compile errors
     suspend fun uploadVideo(
         title: String,
         description: String,
@@ -198,24 +209,54 @@ class NexoraStreamRepository(private val context: Context) {
         tags: String,
         localUri: String,
         thumbnailUri: String,
-        channelName: String = "Zentora Creator"
+        collabChannelId: String? = null,
+        isPremiere: Boolean = false,
+        scheduledTimeMs: Long? = null,
+        duration: Long = 60000L,
+        chapterMarkersJson: String = "[]",
+        visibility: String = "Public",
+        isMadeForKids: Boolean = false,
+        isAgeRestricted: Boolean = false,
+        location: String = "",
+        shortsRemixing: String = "Allow video and audio remixing",
+        commentsModeration: String = "On (Strict)",
+        showLikesCount: Boolean = true,
+        containsPaidPromotion: Boolean = false,
+        videoLanguage: String = "English",
+        licenseType: String = "Standard Nexora License",
+        allowEmbedding: Boolean = true,
+        notifySubscribers: Boolean = true
     ): VideoEntity {
         val newVideo = VideoEntity(
-            id = "NEX-" + System.currentTimeMillis(),
+            id = "vid_${UUID.randomUUID()}",
             localUri = localUri,
             title = title,
             description = description,
             category = category,
             tags = tags,
             timestamp = System.currentTimeMillis(),
-            duration = 60000L,
+            duration = duration,
             viewCount = 0L,
+            chapterMarkersJson = chapterMarkersJson,
             thumbnailUri = thumbnailUri,
-            authorChannelId = "ch_zentora_core"
+            authorChannelId = "ch_zentora_core",
+            collabChannelId = collabChannelId,
+            isPremiere = isPremiere,
+            premiereScheduledTimeMs = scheduledTimeMs
         )
         dao.insertVideo(newVideo)
+        dao.insertInteraction(
+            InteractionEntity(
+                videoId = newVideo.id,
+                likesCount = 0L,
+                dislikesCount = 0L,
+                isLikedByMe = false,
+                isDislikedByMe = false,
+                savedToWatchLater = false,
+                sparksReceived = 0L
+            )
+        )
 
-        // সরাসরি আপনার সার্ভারের /api/v1/videos/publish রুটে ডেটা ইনজেক্ট ও ৬ষ্ঠ মহা-ঘরে লক করা
         scope.launch {
             var connection: HttpURLConnection? = null
             try {
@@ -235,25 +276,34 @@ class NexoraStreamRepository(private val context: Context) {
                     put("tags", tags)
                     put("videoUrl", localUri)
                     put("thumbnailUrl", thumbnailUri)
-                    put("channelName", channelName)
+                    put("channelName", "Zentora Creator")
                 }
 
                 connection.outputStream.use { os ->
                     os.write(payload.toString().toByteArray(Charsets.UTF_8))
                 }
-
-                val responseCode = connection.responseCode
-                if (responseCode == 200 || responseCode == 201) {
-                    Log.d("ZentoraVault", "SUCCESS: Video published and locked into 6th Grand Master Vault!")
-                }
+                connection.responseCode
             } catch (e: Exception) {
-                Log.e("ZentoraVault", "Error publishing video to backend: ${e.message}")
+                Log.e("ZentoraVault", "Error publishing video: ${e.message}")
             } finally {
                 connection?.disconnect()
             }
         }
         return newVideo
     }
+
+    suspend fun updateVideoMetadata(id: String, title: String, description: String, category: String, tags: String) {
+        val existing = dao.getVideoByIdSync(id) ?: return
+        dao.updateVideo(existing.copy(title = title, description = description, category = category, tags = tags))
+    }
+
+    // Resolved deleteVideo reference error
+    suspend fun deleteVideo(id: String) {
+        dao.deleteVideoById(id)
+        dao.deleteHistoryById(id)
+    }
+
+    fun getInteraction(videoId: String): Flow<InteractionEntity?> = dao.getInteraction(videoId)
 
     suspend fun toggleLike(videoId: String) {
         val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
@@ -270,12 +320,172 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    fun getVideo(id: String): Flow<VideoEntity?> = dao.getVideoById(id)
+    suspend fun toggleDislike(videoId: String) {
+        val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
+        val newDisliked = !current.isDislikedByMe
+        val newDislikes = if (newDisliked) current.dislikesCount + 1 else maxOf(0L, current.dislikesCount - 1)
+        dao.updateInteraction(current.copy(isDislikedByMe = newDisliked, dislikesCount = newDislikes))
+    }
+
+    // Resolved toggleWatchLater reference error
+    suspend fun toggleWatchLater(videoId: String) {
+        val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
+        dao.updateInteraction(current.copy(savedToWatchLater = !current.savedToWatchLater))
+    }
+
+    suspend fun sendSparks(videoId: String, sparks: Long) {
+        dao.addSparks(videoId, sparks)
+        scope.launch {
+            try {
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(videoId = videoId, sparksDelta = sparks, nexoraId = NexoraIdManager.getSession().nexoraId)
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
     fun getComments(videoId: String): Flow<List<CommentEntity>> = dao.getCommentsForVideo(videoId)
 
-    private suspend fun seedInitialCoreDataIfNeeded() {
-        // প্রাথমিক সিডিং লজিক
+    suspend fun addComment(videoId: String, authorName: String, text: String): Boolean {
+        val isSafe = CommunityShield.isContentSafe(text)
+        val sanitized = if (isSafe) text else CommunityShield.filterText(text)
+
+        val comment = CommentEntity(
+            commentId = "c_${UUID.randomUUID()}", videoId = videoId, authorName = authorName,
+            commentText = sanitized, timestamp = System.currentTimeMillis(), likeCount = 0L, isFiltered = !isSafe, isLikedByMe = false
+        )
+        dao.insertComment(comment)
+
+        scope.launch {
+            try {
+                val session = NexoraIdManager.getSession()
+                NexoraNetworkClient.apiService.postComment(
+                    PostCommentRequest(commentId = comment.commentId, videoId = videoId, authorName = authorName, commentText = sanitized, nexoraId = session.nexoraId, timestamp = comment.timestamp)
+                )
+            } catch (_: Exception) {}
+        }
+        return isSafe
     }
+
+    suspend fun toggleCommentLike(comment: CommentEntity) {
+        val newLiked = !comment.isLikedByMe
+        val newCount = if (newLiked) comment.likeCount + 1 else maxOf(0L, comment.likeCount - 1)
+        dao.updateComment(comment.copy(isLikedByMe = newLiked, likeCount = newCount))
+    }
+
+    fun getChannel(channelId: String): Flow<ChannelEntity?> = dao.getChannelById(channelId)
+
+    suspend fun toggleSubscribe(channelId: String) {
+        val channel = dao.getChannelByIdSync(channelId) ?: return
+        val newSubscribed = !channel.isSubscribed
+        val newSubs = if (newSubscribed) channel.subscriberCount + 1 else maxOf(0L, channel.subscriberCount - 1)
+        val newLevel = NexoraIdManager.calculateCreatorLevel(newSubs, 0L)
+
+        dao.updateChannel(channel.copy(isSubscribed = newSubscribed, subscriberCount = newSubs, creatorLevel = newLevel))
+    }
+
+    fun getNotes(videoId: String): Flow<List<NotesEntity>> = dao.getNotesForVideo(videoId)
+
+    suspend fun addNote(videoId: String, timestampMs: Long, text: String) {
+        val note = NotesEntity(noteId = "note_${UUID.randomUUID()}", videoId = videoId, timestampMs = timestampMs, noteText = text)
+        dao.insertNote(note)
+    }
+
+    suspend fun deleteNote(noteId: String) {
+        dao.deleteNote(noteId)
+    }
+
+    // Resolved createCommunityPost reference error
+    suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
+        val post = CommunityPostEntity(
+            postId = "post_${UUID.randomUUID()}", channelId = channelId, contentText = contentText,
+            imageUri = imageUri, pollOptionsJson = pollOptionsJson, upvotes = 0L, isUpvotedByMe = false, timestamp = System.currentTimeMillis()
+        )
+        dao.insertCommunityPost(post)
+    }
+
+    suspend fun togglePostUpvote(post: CommunityPostEntity) {
+        val newUpvoted = !post.isUpvotedByMe
+        val newCount = if (newUpvoted) post.upvotes + 1 else maxOf(0L, post.upvotes - 1)
+        dao.updateCommunityPost(post.copy(isUpvotedByMe = newUpvoted, upvotes = newCount))
+    }
+
+    // Resolved setKidsMode reference error
+    fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
+        if (enteredPin == _masterPin.value) {
+            _isKidsMode.value = enabled
+            return true
+        }
+        return false
+    }
+
+    fun updateMasterPin(oldPin: String, newPin: String): Boolean {
+        if (oldPin == _masterPin.value && newPin.length == 4) {
+            _masterPin.value = newPin
+            return true
+        }
+        return false
+    }
+
+    // Resolved setDataSaver reference error
+    fun setDataSaver(enabled: Boolean) {
+        _isDataSaver.value = enabled
+    }
+
+    suspend fun clearHistory() {
+        dao.clearHistory()
+    }
+
+    suspend fun removeFromHistory(videoId: String) {
+        dao.deleteHistoryById(videoId)
+    }
+
+    suspend fun upsertChannel(channel: ChannelEntity) {
+        dao.insertChannel(channel)
+    }
+
+    val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
+
+    suspend fun getPrivateProfile(): PrivateFriendProfileEntity? = dao.getPrivateProfileSync()
+
+    suspend fun isHandleTaken(handle: String): Boolean = dao.countHandleOccurrences(handle.trim()) > 0
+
+    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.insertPrivateProfile(profile)
+    }
+
+    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.updatePrivateProfile(profile)
+    }
+
+    fun getAllPrivateFriends(): Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
+
+    fun searchPrivateFriends(query: String): Flow<List<PrivateFriendEntity>> = dao.searchPrivateFriends(query)
+
+    suspend fun getPrivateFriend(handle: String): PrivateFriendEntity? = dao.getPrivateFriendByHandle(handle)
+
+    suspend fun addPrivateFriend(friend: PrivateFriendEntity) {
+        dao.insertPrivateFriend(friend)
+    }
+
+    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> =
+        dao.getMessagesForConversation(handle)
+
+    suspend fun sendChatMessage(conversationHandle: String, senderHandle: String, text: String, mediaUri: String? = null) {
+        val message = PrivateChatMessageEntity(
+            messageId = "msg_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
+            conversationHandle = conversationHandle, senderHandle = senderHandle, text = text,
+            mediaUri = mediaUri, timestamp = System.currentTimeMillis(), isFromMe = true, isRead = true
+        )
+        dao.insertChatMessage(message)
+    }
+
+    suspend fun markConversationAsRead(handle: String) {
+        dao.markMessagesAsRead(handle)
+        dao.clearUnreadCount(handle)
+    }
+
+    private suspend fun seedInitialCoreDataIfNeeded() {}
 
     companion object {
         @Volatile
