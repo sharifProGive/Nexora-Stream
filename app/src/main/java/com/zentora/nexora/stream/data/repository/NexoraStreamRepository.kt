@@ -52,7 +52,11 @@ class NexoraStreamRepository(private val context: Context) {
     init {
         scope.launch {
             seedInitialCoreDataIfNeeded()
-            syncFeedFromCentralVaults()
+            
+            // সার্ভার থেকে সেন্ট্রাল ফিড রিকভার ও সিঙ্ক করার মূল ট্রিগার
+            val syncResult = syncFeedFromCentralVaults()
+            Log.d("NexoraAccountSync", "Auto-recovery feed sync result on startup: $syncResult")
+            
             restoreAccountFromCentralVaults()
             
             val session = NexoraIdManager.getSession()
