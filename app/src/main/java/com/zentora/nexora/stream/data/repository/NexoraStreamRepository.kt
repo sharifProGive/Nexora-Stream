@@ -166,11 +166,59 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
+    // ফিক্সড: এখন সার্ভার থেকে প্রোফাইল পাওয়ার পর ভিডিও ও চ্যানেলগুলো লোকাল ডাটাবেজে ইনসার্ট হবে!
     suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
         return runCatching {
             val session = NexoraIdManager.getSession()
             val response = NexoraNetworkClient.apiService.restoreUserProfile(session.nexoraId)
             if (response.isSuccessful && response.body() != null) {
+                val profile = response.body()!!
+                val channel = ChannelEntity(
+                    channelId = "ch_zentora_core",
+                    channelName = if (profile.username.isNotBlank()) profile.username else "Zentora CLC",
+                    avatarUri = profile.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80" },
+                    bannerUri = "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80",
+                    subscriberCount = profile.subscriberCount,
+                    isSubscribed = false,
+                    creatorLevel = profile.creatorLevel,
+                    hasZentoraBadge = true,
+                    description = "Official channel of Zentora CLC. Restored from Central Vaults."
+                )
+                dao.insertChannel(channel)
+
+                for (item in profile.uploadedVideos) {
+                    val video = VideoEntity(
+                        id = item.id,
+                        localUri = item.localUri,
+                        title = item.title,
+                        description = item.description,
+                        category = item.category,
+                        tags = item.tags,
+                        timestamp = item.timestamp,
+                        duration = item.duration,
+                        viewCount = item.viewCount,
+                        chapterMarkersJson = item.chapterMarkersJson,
+                        thumbnailUri = item.thumbnailUri,
+                        authorChannelId = item.authorChannelId,
+                        collabChannelId = item.collabChannelId,
+                        isPremiere = item.isPremiere,
+                        premiereScheduledTimeMs = item.premiereScheduledTimeMs
+                    )
+                    dao.insertVideo(video)
+                    if (dao.getInteractionSync(item.id) == null) {
+                        dao.insertInteraction(
+                            InteractionEntity(
+                                videoId = item.id,
+                                likesCount = 0L,
+                                dislikesCount = 0L,
+                                isLikedByMe = false,
+                                isDislikedByMe = false,
+                                savedToWatchLater = false,
+                                sparksReceived = 0L
+                            )
+                        )
+                    }
+                }
                 true
             } else {
                 false
