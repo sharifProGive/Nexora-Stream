@@ -40,7 +40,6 @@ class NexoraStreamRepository(private val context: Context) {
 
     fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>> = dao.getVideosByAuthor(authorChannelId)
 
-    // Parental Controls & Data Settings State
     private val _isKidsMode = MutableStateFlow(false)
     val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
 
@@ -106,6 +105,59 @@ class NexoraStreamRepository(private val context: Context) {
                 feed.videos.size
             } else {
                 0
+            }
+        }
+    }
+
+    suspend fun registerUserSessionWithCentralVault() {
+        scope.launch {
+            try {
+                val session = NexoraIdManager.getSession()
+                NexoraNetworkClient.apiService.registerUser(
+                    RegisterUserRequest(
+                        nexoraId = session.nexoraId,
+                        username = session.username,
+                        email = session.email,
+                        handle = session.handle,
+                        avatarUri = session.avatarUri,
+                        zentoraAuthToken = session.zentoraAuthToken
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Register session error: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun searchGlobalVaults(query: String) {
+        if (query.isBlank()) return
+        scope.launch {
+            try {
+                val response = NexoraNetworkClient.apiService.searchGlobalVideos(query)
+                if (response.isSuccessful && response.body() != null) {
+                    for (item in response.body()!!.videos) {
+                        val video = VideoEntity(
+                            id = item.id,
+                            localUri = item.localUri,
+                            title = item.title,
+                            description = item.description,
+                            category = item.category,
+                            tags = item.tags,
+                            timestamp = item.timestamp,
+                            duration = item.duration,
+                            viewCount = item.viewCount,
+                            chapterMarkersJson = item.chapterMarkersJson,
+                            thumbnailUri = item.thumbnailUri,
+                            authorChannelId = item.authorChannelId,
+                            collabChannelId = item.collabChannelId,
+                            isPremiere = item.isPremiere,
+                            premiereScheduledTimeMs = item.premiereScheduledTimeMs
+                        )
+                        dao.insertVideo(video)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("NexoraAccountSync", "Search error: ${e.message}")
             }
         }
     }
@@ -201,7 +253,6 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    // Upload Video with all required parameters to resolve ViewModel compile errors
     suspend fun uploadVideo(
         title: String,
         description: String,
@@ -297,7 +348,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateVideo(existing.copy(title = title, description = description, category = category, tags = tags))
     }
 
-    // Resolved deleteVideo reference error
     suspend fun deleteVideo(id: String) {
         dao.deleteVideoById(id)
         dao.deleteHistoryById(id)
@@ -327,7 +377,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateInteraction(current.copy(isDislikedByMe = newDisliked, dislikesCount = newDislikes))
     }
 
-    // Resolved toggleWatchLater reference error
     suspend fun toggleWatchLater(videoId: String) {
         val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
         dao.updateInteraction(current.copy(savedToWatchLater = !current.savedToWatchLater))
@@ -395,7 +444,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.deleteNote(noteId)
     }
 
-    // Resolved createCommunityPost reference error
     suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
         val post = CommunityPostEntity(
             postId = "post_${UUID.randomUUID()}", channelId = channelId, contentText = contentText,
@@ -410,7 +458,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateCommunityPost(post.copy(isUpvotedByMe = newUpvoted, upvotes = newCount))
     }
 
-    // Resolved setKidsMode reference error
     fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
         if (enteredPin == _masterPin.value) {
             _isKidsMode.value = enabled
@@ -427,7 +474,6 @@ class NexoraStreamRepository(private val context: Context) {
         return false
     }
 
-    // Resolved setDataSaver reference error
     fun setDataSaver(enabled: Boolean) {
         _isDataSaver.value = enabled
     }
