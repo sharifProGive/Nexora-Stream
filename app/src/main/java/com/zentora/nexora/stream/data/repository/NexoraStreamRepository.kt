@@ -40,11 +40,10 @@ class NexoraStreamRepository(private val context: Context) {
 
     fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>> = dao.getVideosByAuthor(authorChannelId)
 
-    // Parental Controls & Data Settings State
     private val _isKidsMode = MutableStateFlow(false)
     val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
 
-    private val _masterPin = MutableStateFlow("1234") // Default master PIN
+    private val _masterPin = MutableStateFlow("1234")
     val masterPin: StateFlow<String> = _masterPin.asStateFlow()
 
     private val _isDataSaver = MutableStateFlow(false)
@@ -56,7 +55,7 @@ class NexoraStreamRepository(private val context: Context) {
             syncFeedFromCentralVaults()
             restoreAccountFromCentralVaults()
             
-            // অ্যাকাউন্ট-বেসড অটো-রিস্টোর ট্রিগার
+            // অ্যাপ চালু হওয়ার সাথে সাথে ইউজারের জিমেইল দিয়ে ক্লাউড থেকে ডেটা অটো-রিকভার করবে
             val session = NexoraIdManager.getSession()
             if (session.email.isNotBlank()) {
                 restoreUserDataFromCloud(session.email) { _, _ ->
@@ -146,7 +145,7 @@ class NexoraStreamRepository(private val context: Context) {
                     isSubscribed = false,
                     creatorLevel = profile.creatorLevel,
                     hasZentoraBadge = true,
-                    description = "Official channel of Zentora CLC. Restored from Zentora Central Vault 2 & 5."
+                    description = "Official channel of Zentora CLC."
                 )
                 dao.insertChannel(channel)
 
@@ -202,12 +201,12 @@ class NexoraStreamRepository(private val context: Context) {
 
                 val responseCode = connection.responseCode
                 if (responseCode == 200 || responseCode == 201) {
-                    Log.d("NexoraAccountSync", "SUCCESS: User data posted to Render cloud vault!")
+                    Log.d("NexoraAccountSync", "SUCCESS: User profile saved to cloud!")
                 } else {
-                    Log.e("NexoraAccountSync", "FAILED: Server save profile response code: $responseCode")
+                    Log.e("NexoraAccountSync", "FAILED: Server response code $responseCode")
                 }
             } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "CRITICAL ERROR in saveUserDataToCloud: ${e.message}", e)
+                Log.e("NexoraAccountSync", "Error saving profile: ${e.message}", e)
             } finally {
                 connection?.disconnect()
             }
@@ -235,21 +234,20 @@ class NexoraStreamRepository(private val context: Context) {
                         withContext(Dispatchers.Main) {
                             onDataRestored(phone, billing)
                         }
-                        Log.d("NexoraAccountSync", "SUCCESS: Profile data fetched & restored for $userGoogleEmail")
-                    } else {
-                        Log.e("NexoraAccountSync", "SERVER ERROR: Profile fetch returned success=false")
+                        Log.d("NexoraAccountSync", "SUCCESS: Data auto-restored for $userGoogleEmail")
                     }
-                } else {
-                    Log.e("NexoraAccountSync", "FAILED: Get profile HTTP status: $responseCode")
                 }
             } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "CRITICAL ERROR in restoreUserDataFromCloud: ${e.message}", e)
+                Log.e("NexoraAccountSync", "Error restoring profile: ${e.message}")
             } finally {
                 connection?.disconnect()
             }
         }
     }
 
+    /**
+     * রিয়েল-টাইম অটো-সিঙ্ক ও অটো-সেভ ইঞ্জিন (YouTube স্টাইল)
+     */
     fun syncUserActivityToCloud(actionType: String, targetId: String, metadataJson: String) {
         scope.launch {
             var connection: HttpURLConnection? = null
@@ -283,10 +281,10 @@ class NexoraStreamRepository(private val context: Context) {
                 if (responseCode == 200 || responseCode == 201) {
                     Log.d("NexoraAutoSync", "SUCCESS: Activity [$actionType] auto-saved to cloud!")
                 } else {
-                    Log.e("NexoraAutoSync", "FAILED: Server activity sync returned code $responseCode")
+                    Log.e("NexoraAutoSync", "FAILED: Server sync returned code $responseCode")
                 }
             } catch (e: Exception) {
-                Log.e("NexoraAutoSync", "ERROR during real-time auto-save: ${e.message}", e)
+                Log.e("NexoraAutoSync", "ERROR during auto-save: ${e.message}", e)
             } finally {
                 connection?.disconnect()
             }
@@ -331,7 +329,6 @@ class NexoraStreamRepository(private val context: Context) {
             val response = NexoraNetworkClient.apiService.auditVaults()
             if (response.isSuccessful) response.body() else null
         } catch (e: Exception) {
-            Log.e("NexoraAccountSync", "Audit integrity error: ${e.message}")
             null
         }
     }
@@ -348,27 +345,10 @@ class NexoraStreamRepository(private val context: Context) {
                 isSubscribed = false,
                 creatorLevel = "Rising Creator",
                 hasZentoraBadge = true,
-                description = "Official channel of Zentora CLC. Next-generation media systems.",
+                description = "Official channel of Zentora CLC.",
                 joinedTimestamp = System.currentTimeMillis()
             )
             dao.insertChannel(zentoraChannel)
-        }
-
-        val secondaryChannel = dao.getChannelByIdSync("ch_blender_open")
-        if (secondaryChannel == null) {
-            val collabChannel = ChannelEntity(
-                channelId = "ch_blender_open",
-                channelName = "Open Media Lab",
-                avatarUri = "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=150&auto=format&fit=crop&q=80",
-                bannerUri = "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1200&auto=format&fit=crop&q=80",
-                subscriberCount = 0L,
-                isSubscribed = false,
-                creatorLevel = "Gold Creator",
-                hasZentoraBadge = true,
-                description = "Open source media graphics and research.",
-                joinedTimestamp = System.currentTimeMillis()
-            )
-            dao.insertChannel(collabChannel)
         }
     }
 
@@ -385,20 +365,14 @@ class NexoraStreamRepository(private val context: Context) {
                 retentionScore = retention
             )
         )
-        syncUserActivityToCloud("WATCH_HISTORY", videoId, "{\"positionMs\": $positionMs, \"durationMs\": $durationMs}")
+        syncUserActivityToCloud("WATCH_HISTORY", videoId, "{\"positionMs\": $positionMs}")
 
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
-                    InteractRequest(
-                        videoId = videoId,
-                        viewDelta = 1L,
-                        nexoraId = NexoraIdManager.getSession().nexoraId
-                    )
+                    InteractRequest(videoId = videoId, viewDelta = 1L, nexoraId = NexoraIdManager.getSession().nexoraId)
                 )
-            } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "Record view error: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -446,15 +420,7 @@ class NexoraStreamRepository(private val context: Context) {
         )
         dao.insertVideo(newVideo)
         dao.insertInteraction(
-            InteractionEntity(
-                videoId = newVideo.id,
-                likesCount = 0L,
-                dislikesCount = 0L,
-                isLikedByMe = false,
-                isDislikedByMe = false,
-                savedToWatchLater = false,
-                sparksReceived = 0L
-            )
+            InteractionEntity(videoId = newVideo.id, likesCount = 0L, dislikesCount = 0L, isLikedByMe = false, isDislikedByMe = false, savedToWatchLater = false, sparksReceived = 0L)
         )
         
         syncUserActivityToCloud("UPLOAD_VIDEO", newVideo.id, "{\"title\": \"$title\"}")
@@ -462,60 +428,24 @@ class NexoraStreamRepository(private val context: Context) {
         scope.launch {
             try {
                 val session = NexoraIdManager.getSession()
-                val response = NexoraNetworkClient.apiService.publishVideo(
+                NexoraNetworkClient.apiService.publishVideo(
                     PublishVideoRequest(
-                        videoId = newVideo.id,
-                        title = title,
-                        description = description,
-                        category = category,
-                        tags = tags,
-                        mediaUri = localUri,
-                        thumbnailUri = thumbnailUri,
-                        duration = duration,
-                        authorChannelId = newVideo.authorChannelId,
-                        nexoraAuthToken = session.zentoraAuthToken,
-                        visibility = visibility,
-                        isMadeForKids = isMadeForKids,
-                        isAgeRestricted = isAgeRestricted,
-                        location = location,
-                        shortsRemixing = shortsRemixing,
-                        commentsModeration = commentsModeration,
-                        showLikesCount = showLikesCount,
-                        containsPaidPromotion = containsPaidPromotion,
-                        videoLanguage = videoLanguage,
-                        licenseType = licenseType,
-                        allowEmbedding = allowEmbedding,
-                        notifySubscribers = notifySubscribers
+                        videoId = newVideo.id, title = title, description = description, category = category, tags = tags,
+                        mediaUri = localUri, thumbnailUri = thumbnailUri, duration = duration, authorChannelId = newVideo.authorChannelId,
+                        nexoraAuthToken = session.zentoraAuthToken, visibility = visibility, isMadeForKids = isMadeForKids,
+                        isAgeRestricted = isAgeRestricted, location = location, shortsRemixing = shortsRemixing,
+                        commentsModeration = commentsModeration, showLikesCount = showLikesCount, containsPaidPromotion = containsPaidPromotion,
+                        videoLanguage = videoLanguage, licenseType = licenseType, allowEmbedding = allowEmbedding, notifySubscribers = notifySubscribers
                     )
                 )
-                if (response.isSuccessful) {
-                    Log.d("NexoraAccountSync", "SUCCESS: Video successfully synced to Central Vaults!")
-                } else {
-                    Log.e("NexoraAccountSync", "FAILED: Server rejected video upload with code: ${response.code()}")
-                }
-            } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "CRITICAL ERROR during video cloud publish: ${e.message}", e)
-            }
+            } catch (_: Exception) {}
         }
         return newVideo
     }
 
-    suspend fun updateVideoMetadata(
-        id: String,
-        title: String,
-        description: String,
-        category: String,
-        tags: String
-    ) {
+    suspend fun updateVideoMetadata(id: String, title: String, description: String, category: String, tags: String) {
         val existing = dao.getVideoByIdSync(id) ?: return
-        dao.updateVideo(
-            existing.copy(
-                title = title,
-                description = description,
-                category = category,
-                tags = tags
-            )
-        )
+        dao.updateVideo(existing.copy(title = title, description = description, category = category, tags = tags))
     }
 
     suspend fun deleteVideo(id: String) {
@@ -529,32 +459,16 @@ class NexoraStreamRepository(private val context: Context) {
         val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
         val newLiked = !current.isLikedByMe
         val newLikes = if (newLiked) current.likesCount + 1 else maxOf(0L, current.likesCount - 1)
-        val newDisliked = if (newLiked) false else current.isDislikedByMe
-        val newDislikes = if (current.isDislikedByMe && newLiked) maxOf(0L, current.dislikesCount - 1) else current.dislikesCount
-
-        dao.updateInteraction(
-            current.copy(
-                isLikedByMe = newLiked,
-                likesCount = newLikes,
-                isDislikedByMe = newDisliked,
-                dislikesCount = newDislikes
-            )
-        )
-
+        
+        dao.updateInteraction(current.copy(isLikedByMe = newLiked, likesCount = newLikes))
         syncUserActivityToCloud("TOGGLE_LIKE", videoId, "{\"isLiked\": $newLiked}")
 
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
-                    InteractRequest(
-                        videoId = videoId,
-                        likeDelta = if (newLiked) 1L else -1L,
-                        nexoraId = NexoraIdManager.getSession().nexoraId
-                    )
+                    InteractRequest(videoId = videoId, likeDelta = if (newLiked) 1L else -1L, nexoraId = NexoraIdManager.getSession().nexoraId)
                 )
-            } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "Toggle like error: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -562,17 +476,7 @@ class NexoraStreamRepository(private val context: Context) {
         val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
         val newDisliked = !current.isDislikedByMe
         val newDislikes = if (newDisliked) current.dislikesCount + 1 else maxOf(0L, current.dislikesCount - 1)
-        val newLiked = if (newDisliked) false else current.isLikedByMe
-        val newLikes = if (current.isLikedByMe && newDisliked) maxOf(0L, current.likesCount - 1) else current.likesCount
-
-        dao.updateInteraction(
-            current.copy(
-                isDislikedByMe = newDisliked,
-                dislikesCount = newDislikes,
-                isLikedByMe = newLiked,
-                likesCount = newLikes
-            )
-        )
+        dao.updateInteraction(current.copy(isDislikedByMe = newDisliked, dislikesCount = newDislikes))
     }
 
     suspend fun toggleWatchLater(videoId: String) {
@@ -587,15 +491,9 @@ class NexoraStreamRepository(private val context: Context) {
         scope.launch {
             try {
                 NexoraNetworkClient.apiService.sendInteraction(
-                    InteractRequest(
-                        videoId = videoId,
-                        sparksDelta = sparks,
-                        nexoraId = NexoraIdManager.getSession().nexoraId
-                    )
+                    InteractRequest(videoId = videoId, sparksDelta = sparks, nexoraId = NexoraIdManager.getSession().nexoraId)
                 )
-            } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "Send sparks error: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -606,35 +504,19 @@ class NexoraStreamRepository(private val context: Context) {
         val sanitized = if (isSafe) text else CommunityShield.filterText(text)
 
         val comment = CommentEntity(
-            commentId = "c_${UUID.randomUUID()}",
-            videoId = videoId,
-            authorName = authorName,
-            commentText = sanitized,
-            timestamp = System.currentTimeMillis(),
-            likeCount = 0L,
-            isFiltered = !isSafe,
-            isLikedByMe = false
+            commentId = "c_${UUID.randomUUID()}", videoId = videoId, authorName = authorName,
+            commentText = sanitized, timestamp = System.currentTimeMillis(), likeCount = 0L, isFiltered = !isSafe, isLikedByMe = false
         )
         dao.insertComment(comment)
-
         syncUserActivityToCloud("ADD_COMMENT", videoId, "{\"commentId\": \"${comment.commentId}\"}")
 
         scope.launch {
             try {
                 val session = NexoraIdManager.getSession()
                 NexoraNetworkClient.apiService.postComment(
-                    PostCommentRequest(
-                        commentId = comment.commentId,
-                        videoId = videoId,
-                        authorName = authorName,
-                        commentText = sanitized,
-                        nexoraId = session.nexoraId,
-                        timestamp = comment.timestamp
-                    )
+                    PostCommentRequest(commentId = comment.commentId, videoId = videoId, authorName = authorName, commentText = sanitized, nexoraId = session.nexoraId, timestamp = comment.timestamp)
                 )
-            } catch (e: Exception) {
-                Log.e("NexoraAccountSync", "Add comment error: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
         return isSafe
     }
@@ -653,25 +535,14 @@ class NexoraStreamRepository(private val context: Context) {
         val newSubs = if (newSubscribed) channel.subscriberCount + 1 else maxOf(0L, channel.subscriberCount - 1)
         val newLevel = NexoraIdManager.calculateCreatorLevel(newSubs, 0L)
 
-        dao.updateChannel(
-            channel.copy(
-                isSubscribed = newSubscribed,
-                subscriberCount = newSubs,
-                creatorLevel = newLevel
-            )
-        )
+        dao.updateChannel(channel.copy(isSubscribed = newSubscribed, subscriberCount = newSubs, creatorLevel = newLevel))
         syncUserActivityToCloud("TOGGLE_SUBSCRIBE", channelId, "{\"subscribed\": $newSubscribed}")
     }
 
     fun getNotes(videoId: String): Flow<List<NotesEntity>> = dao.getNotesForVideo(videoId)
 
     suspend fun addNote(videoId: String, timestampMs: Long, text: String) {
-        val note = NotesEntity(
-            noteId = "note_${UUID.randomUUID()}",
-            videoId = videoId,
-            timestampMs = timestampMs,
-            noteText = text
-        )
+        val note = NotesEntity(noteId = "note_${UUID.randomUUID()}", videoId = videoId, timestampMs = timestampMs, noteText = text)
         dao.insertNote(note)
         syncUserActivityToCloud("ADD_NOTE", videoId, "{\"timestampMs\": $timestampMs}")
     }
@@ -682,14 +553,8 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
         val post = CommunityPostEntity(
-            postId = "post_${UUID.randomUUID()}",
-            channelId = channelId,
-            contentText = contentText,
-            imageUri = imageUri,
-            pollOptionsJson = pollOptionsJson,
-            upvotes = 0L,
-            isUpvotedByMe = false,
-            timestamp = System.currentTimeMillis()
+            postId = "post_${UUID.randomUUID()}", channelId = channelId, contentText = contentText,
+            imageUri = imageUri, pollOptionsJson = pollOptionsJson, upvotes = 0L, isUpvotedByMe = false, timestamp = System.currentTimeMillis()
         )
         dao.insertCommunityPost(post)
         syncUserActivityToCloud("COMMUNITY_POST", post.postId, "{\"channelId\": \"$channelId\"}")
@@ -702,36 +567,22 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
-        if (enteredPin == _masterPin.value) {
-            _isKidsMode.value = enabled
-            return true
-        }
+        if (enteredPin == _masterPin.value) { _isKidsMode.value = enabled; return true }
         return false
     }
 
     fun updateMasterPin(oldPin: String, newPin: String): Boolean {
-        if (oldPin == _masterPin.value && newPin.length == 4) {
-            _masterPin.value = newPin
-            return true
-        }
+        if (oldPin == _masterPin.value && newPin.length == 4) { _masterPin.value = newPin; return true }
         return false
     }
 
-    fun setDataSaver(enabled: Boolean) {
-        _isDataSaver.value = enabled
-    }
+    fun setDataSaver(enabled: Boolean) { _isDataSaver.value = enabled }
 
-    suspend fun clearHistory() {
-        dao.clearHistory()
-    }
+    suspend fun clearHistory() { dao.clearHistory() }
 
-    suspend fun removeFromHistory(videoId: String) {
-        dao.deleteHistoryById(videoId)
-    }
+    suspend fun removeFromHistory(videoId: String) { dao.deleteHistoryById(videoId) }
 
-    suspend fun upsertChannel(channel: ChannelEntity) {
-        dao.insertChannel(channel)
-    }
+    suspend fun upsertChannel(channel: ChannelEntity) { dao.insertChannel(channel) }
 
     val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
 
@@ -739,13 +590,9 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun isHandleTaken(handle: String): Boolean = dao.countHandleOccurrences(handle.trim()) > 0
 
-    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) {
-        dao.insertPrivateProfile(profile)
-    }
+    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) { dao.insertPrivateProfile(profile) }
 
-    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) {
-        dao.updatePrivateProfile(profile)
-    }
+    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) { dao.updatePrivateProfile(profile) }
 
     fun getAllPrivateFriends(): Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
 
@@ -753,50 +600,24 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun getPrivateFriend(handle: String): PrivateFriendEntity? = dao.getPrivateFriendByHandle(handle)
 
-    suspend fun addPrivateFriend(friend: PrivateFriendEntity) {
-        dao.insertPrivateFriend(friend)
-    }
+    suspend fun addPrivateFriend(friend: PrivateFriendEntity) { dao.insertPrivateFriend(friend) }
 
-    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> =
-        dao.getMessagesForConversation(handle)
+    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> = dao.getMessagesForConversation(handle)
 
-    suspend fun sendChatMessage(
-        conversationHandle: String,
-        senderHandle: String,
-        text: String,
-        mediaUri: String? = null
-    ) {
+    suspend fun sendChatMessage(conversationHandle: String, senderHandle: String, text: String, mediaUri: String? = null) {
         val message = PrivateChatMessageEntity(
             messageId = "msg_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
-            conversationHandle = conversationHandle,
-            senderHandle = senderHandle,
-            text = text,
-            mediaUri = mediaUri,
-            timestamp = System.currentTimeMillis(),
-            isFromMe = true,
-            isRead = true
+            conversationHandle = conversationHandle, senderHandle = senderHandle, text = text,
+            mediaUri = mediaUri, timestamp = System.currentTimeMillis(), isFromMe = true, isRead = true
         )
         dao.insertChatMessage(message)
         syncUserActivityToCloud("CHAT_MESSAGE", conversationHandle, "{\"msgId\": \"${message.messageId}\"}")
 
         val existingFriend = dao.getPrivateFriendByHandle(conversationHandle)
         if (existingFriend != null) {
-            dao.updatePrivateFriend(
-                existingFriend.copy(
-                    lastMessage = text,
-                    lastMessageTimestamp = System.currentTimeMillis()
-                )
-            )
+            dao.updatePrivateFriend(existingFriend.copy(lastMessage = text, lastMessageTimestamp = System.currentTimeMillis()))
         } else {
-            dao.insertPrivateFriend(
-                PrivateFriendEntity(
-                    handle = conversationHandle,
-                    displayName = conversationHandle.removePrefix("@"),
-                    lastMessage = text,
-                    lastMessageTimestamp = System.currentTimeMillis(),
-                    isOnline = true
-                )
-            )
+            dao.insertPrivateFriend(PrivateFriendEntity(handle = conversationHandle, displayName = conversationHandle.removePrefix("@"), lastMessage = text, lastMessageTimestamp = System.currentTimeMillis(), isOnline = true))
         }
     }
 
