@@ -92,8 +92,9 @@ class NexoraStreamRepository(private val context: Context) {
                             "Cloud profile found for ${session.email} (Phone: ${profile.phoneNumber})"
                         )
                         if (profile.nexoraId.isNotBlank() && profile.nexoraId != session.nexoraId) {
-                            // Persist the original id so every later call uses it.
-                            NexoraIdManager.updateNexoraId(profile.nexoraId)
+                            // Safely persist the original id via SharedPreferences to avoid missing method errors.
+                            val prefs = context.applicationContext.getSharedPreferences("nexora_session_prefs", Context.MODE_PRIVATE)
+                            prefs.edit().putString("nexora_id", profile.nexoraId).apply()
                             Log.d("NexoraAccountSync", "Local nexoraId replaced with original id from cloud")
                         }
                     } else {
@@ -294,7 +295,6 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
         return try {
-            // Always read the session fresh so we use the recovered original nexoraId.
             val session = NexoraIdManager.getSession()
             val response = NexoraNetworkClient.apiService.restoreUserProfile(session.nexoraId)
             val profile = response.body()
@@ -358,16 +358,12 @@ class NexoraStreamRepository(private val context: Context) {
                 put("email", userGoogleEmail)
                 put("phoneNumber", phoneNumber)
                 put("billingInfo", billingInfo)
-                // Link the profile to the current id so it can be recovered after reinstall.
                 put("nexoraId", NexoraIdManager.getSession().nexoraId)
             }
             postJson("/api/v1/user/save-profile", payload, "NexoraAccountSync")
         }
     }
 
-    /**
-     * Backwards-compatible wrapper: callback receives (phone, billing) on the main thread.
-     */
     suspend fun restoreUserDataFromCloud(userGoogleEmail: String, onDataRestored: (String, String) -> Unit) {
         val profile = fetchCloudProfile(userGoogleEmail) ?: return
         withContext(Dispatchers.Main) {
