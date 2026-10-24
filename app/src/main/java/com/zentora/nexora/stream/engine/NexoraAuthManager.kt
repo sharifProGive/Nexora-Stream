@@ -159,6 +159,18 @@ class NexoraAuthManager(private val context: Context) {
                 idToken = idToken
             )
 
+            // Save session to SessionStore so repository recovery works perfectly
+            SessionStore.init(context)
+            val currentSession = NexoraIdManager.getSession()
+            SessionStore.save(
+                AccountSession(
+                    nexoraId = currentSession.nexoraId,
+                    email = email,
+                    displayName = displayName,
+                    avatarUri = photoUrl ?: ""
+                )
+            )
+
             // 2. Persist user record into Room DB (Vault 1 ChannelEntity)
             val channel = ChannelEntity(
                 channelId = "ch_zentora_core",
@@ -173,10 +185,7 @@ class NexoraAuthManager(private val context: Context) {
             )
             repository.upsertChannel(channel)
 
-            // 3. Register session in Central Vault 2 (Registry)
-            repository.registerUserSessionWithCentralVault()
-
-            // 4. Restore user's cloud library from Central Vault 2 & 5 (/api/v1/user/sync)
+            // 3. Restore user's cloud library from Central Vault 2 & 5 (/api/v1/user/sync)
             repository.restoreAccountFromCentralVaults()
 
             NexoraAuthResult.Success(
