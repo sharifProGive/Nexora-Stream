@@ -3,10 +3,15 @@ package com.zentora.nexora.stream.data.repository
 
 import android.content.Context
 import android.util.Log
-import androidx.room.withTransaction
 import com.zentora.nexora.stream.data.database.NexoraDatabase
 import com.zentora.nexora.stream.data.database.entities.*
-import com.zentora.nexora.stream.engine.*
+import com.zentora.nexora.stream.engine.CommunityShield
+import com.zentora.nexora.stream.engine.InteractRequest
+import com.zentora.nexora.stream.engine.NexoraIdManager
+import com.zentora.nexora.stream.engine.NexoraNetworkClient
+import com.zentora.nexora.stream.engine.PostCommentRequest
+import com.zentora.nexora.stream.engine.SessionStore
+import com.zentora.nexora.stream.engine.AccountSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,40 +25,25 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.UUID
 
-// ---------------------------------------------------------------------------
-// Recovery state exposed to the UI ("Restoring your account...")
-// ---------------------------------------------------------------------------
-
-enum class RecoveryStep { VERIFYING, REGISTERING, RESTORING, SYNCING }
-enum class FailureReason { UNAUTHORIZED, SERVER_UNAVAILABLE, UNKNOWN }
-
-sealed interface RecoveryState {
-    data object Idle : RecoveryState
-    data object NeedsSignIn : RecoveryState
-    /** attempt > 1 means the server is cold-starting -> show "Waking up the server...". */
-    data class Restoring(val step: RecoveryStep, val attempt: Int = 1) : RecoveryState
-    data class Ready(val nexoraId: String, val isNewUser: Boolean) : RecoveryState
-    data class Failed(val reason: FailureReason, val message: String) : RecoveryState
-}
+data class CloudUserProfile(
+    val phoneNumber: String,
+    val billingInfo: String,
+    val nexoraId: String
+)
 
 class NexoraStreamRepository(private val context: Context) {
 
     private val db = NexoraDatabase.getInstance(context)
     private val dao = db.nexoraDao()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val backend = AccountBackend(BACKEND_BASE_URL)
-
-    /** Serialises recovery / background resync so they can never race each other. */
     private val recoveryMutex = Mutex()
-
-    /** Set from the app layer (silent Google token refresh). Falls back to the last sign-in token. */
-    @Volatile var tokenProvider: IdTokenProvider? = null
-    @Volatile private var cachedIdToken: String? = null
-
-    private val _recoveryState = MutableStateFlow<RecoveryState>(RecoveryState.Idle)
-    val recoveryState: StateFlow<RecoveryState> = _recoveryState.asStateFlow()
 
     val allVideos: Flow<List<VideoEntity>> = dao.getAllVideos()
     val allChannels: Flow<List<ChannelEntity>> = dao.getAllChannels()
@@ -76,254 +66,90 @@ class NexoraStreamRepository(private val context: Context) {
 
     init {
         SessionStore.init(context)
-        // Only warms the Render instance. NO identity is created and NO recovery runs here any more.
-        scope.launch { backend.warmUp() }
+        scope.launch { runStartupRecovery() }
     }
 
-    // =====================================================================
-    // SESSION GATE + RECOVERY
-    //   a. Google sign-in (UI)  -> idToken
-    //   b. GET  /get-profile    -> 200 original id | 404 new user
-    //   c. 404 -> POST /register (server derives id from verified `sub`)
-    //   d. existing -> save id -> restoreAccountFromCentralVaults()
-    //   e. syncFeedFromCentralVaults()
-    // =====================================================================
-
-    /** Call once from the gate. No verified session on disk => user must sign in first. */
-    fun beginSession() {
-        val s = SessionStore.current()
-        if (s == null) {
-            _recoveryState.value = RecoveryState.NeedsSignIn
-        } else {
-            _recoveryState.value = RecoveryState.Ready(s.nexoraId, isNewUser = false)
-            scope.launch { backgroundResync() }
-        }
-    }
-
-    fun reportSignInCancelled() {
-        _recoveryState.value = RecoveryState.NeedsSignIn
-    }
-
-    fun reportSignInFailure(message: String) {
-        _recoveryState.value = RecoveryState.Failed(FailureReason.UNAUTHORIZED, message)
-    }
-
-    suspend fun currentIdToken(): String? =
-        tokenProvider?.idToken(false) ?: cachedIdToken
-
-    /** Idempotent: safe to call again after a Failed state or a crash half-way through. */
-    suspend fun recoverOrRegister(idToken: String, hint: GoogleProfileHint): RecoveryState {
-        cachedIdToken = idToken
-        val result = recoveryMutex.withLock { performRecovery(idToken, hint) }
-        _recoveryState.value = result
-        return result
-    }
-
-    private suspend fun performRecovery(idToken: String, hint: GoogleProfileHint): RecoveryState {
-        try {
-            // b. verify via backend
-            _recoveryState.value = RecoveryState.Restoring(RecoveryStep.VERIFYING)
-            var isNew = false
-            val identity: CloudIdentity = when (
-                val r = backend.withBackoff(
-                    onRetry = { a -> _recoveryState.value = RecoveryState.Restoring(RecoveryStep.VERIFYING, a) }
-                ) { backend.fetchProfile(idToken) }
-            ) {
-                is BackendResult.Ok -> r.value
-                // c. unknown account -> register (server derives the id)
-                BackendResult.NotFound -> {
-                    isNew = true
-                    _recoveryState.value = RecoveryState.Restoring(RecoveryStep.REGISTERING)
-                    val reg = backend.withBackoff(
-                        onRetry = { a -> _recoveryState.value = RecoveryState.Restoring(RecoveryStep.REGISTERING, a) }
-                    ) { backend.register(idToken, hint) }
-                    if (reg is BackendResult.Ok) reg.value else return failure(reg)
-                }
-                else -> return failure(r)
-            }
-
-            // Persist the SERVER-confirmed id before any data step, so a crash resumes with the right id.
-            SessionStore.save(AccountSession(identity.nexoraId, hint.email, hint.displayName, hint.avatarUri))
-
-            if (isNew) {
-                ensureOwnChannel(hint)
-            } else {
-                // d. restore profile + uploaded videos under the ORIGINAL id
-                _recoveryState.value = RecoveryState.Restoring(RecoveryStep.RESTORING)
-                val restored = restoreAccountFromCentralVaults()
-                if (restored.isFailure) {
-                    return RecoveryState.Failed(
-                        FailureReason.SERVER_UNAVAILABLE,
-                        "Could not restore your account yet. Please try again."
-                    )
-                }
-            }
-
-            // e. feed sync (non-critical: a failure here must not block the user)
-            _recoveryState.value = RecoveryState.Restoring(RecoveryStep.SYNCING)
-            syncFeedFromCentralVaults().onFailure {
-                Log.w(TAG, "Feed sync failed after recovery: ${it.message}")
-            }
-
-            return RecoveryState.Ready(identity.nexoraId, isNewUser = isNew)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Recovery failed: ${e.message}")
-            return RecoveryState.Failed(FailureReason.UNKNOWN, "Something went wrong. Please try again.")
-        }
-    }
-
-    private fun failure(r: BackendResult<*>): RecoveryState.Failed = when (r) {
-        BackendResult.Unauthorized ->
-            RecoveryState.Failed(FailureReason.UNAUTHORIZED, "We couldn't verify your Google sign-in. Please sign in again.")
-        is BackendResult.Retryable ->
-            RecoveryState.Failed(FailureReason.SERVER_UNAVAILABLE, "The server is not responding. Check your connection and try again.")
-        is BackendResult.Fatal ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Unexpected server response (${r.code}).")
-        BackendResult.NotFound ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Account not found.")
-        is BackendResult.Ok ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Unexpected state.")
-    }
-
-    /** Signed-in app start: refresh data quietly, never blocks the UI. */
-    private suspend fun backgroundResync() {
+    private suspend fun runStartupRecovery() {
         recoveryMutex.withLock {
             try {
+                val session = SessionStore.current()
+                if (session != null && session.email.isNotBlank()) {
+                    val profile = fetchCloudProfile(session.email)
+                    if (profile != null) {
+                        Log.d("NexoraAccountSync", "Cloud profile found for ${session.email}")
+                        if (profile.nexoraId.isNotBlank() && profile.nexoraId != session.nexoraId) {
+                            SessionStore.save(AccountSession(profile.nexoraId, session.email, session.displayName, session.avatarUri))
+                            Log.d("NexoraAccountSync", "Local nexoraId updated from cloud: ${profile.nexoraId}")
+                        }
+                    }
+                }
+
                 restoreAccountFromCentralVaults()
                 syncFeedFromCentralVaults()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Background resync failed: ${e.message}")
+                Log.e("NexoraAccountSync", "Startup recovery failed: ${e.message}")
             }
         }
     }
 
-    private suspend fun ensureOwnChannel(hint: GoogleProfileHint) {
-        dao.insertChannel(
-            ChannelEntity(
-                channelId = OWN_CHANNEL_ID,
-                channelName = hint.displayName.ifBlank { "Nexora Creator" },
-                avatarUri = hint.avatarUri.ifBlank { DEFAULT_AVATAR_URL },
-                bannerUri = DEFAULT_BANNER_URL,
-                subscriberCount = 0L,
-                isSubscribed = false,
-                creatorLevel = NexoraIdManager.calculateCreatorLevel(0L, 0L),
-                hasZentoraBadge = true,
-                description = "Official channel of Zentora CLC."
+    suspend fun fetchCloudProfile(email: String): CloudUserProfile? = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        try {
+            val encodedEmail = URLEncoder.encode(email.trim(), "UTF-8")
+            val url = URL("$BACKEND_BASE_URL/api/v1/user/get-profile?email=$encodedEmail")
+            connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = NETWORK_TIMEOUT_MS
+                readTimeout = NETWORK_TIMEOUT_MS
+            }
+
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                return@withContext null
+            }
+
+            val respText = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8))
+                .use { it.readText() }
+            val json = JSONObject(respText)
+            if (!json.optBoolean("success", false)) return@withContext null
+
+            val source = json.optJSONObject("profile") ?: json.optJSONObject("data") ?: json
+            val originalId = source.optString("nexoraId", "").ifBlank {
+                source.optString("nexora_id", "").ifBlank { json.optString("nexoraId", "") }
+            }
+
+            CloudUserProfile(
+                phoneNumber = source.optString("phoneNumber", json.optString("phoneNumber", "")),
+                billingInfo = source.optString("billingInfo", json.optString("billingInfo", "")),
+                nexoraId = originalId
             )
-        )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("NexoraAccountSync", "Error fetching profile: ${e.message}")
+            null
+        } finally {
+            connection?.disconnect()
+        }
     }
 
-    // =====================================================================
-    // REMOTE -> ROOM (idempotent: REPLACE/upsert keyed by primary key, batched in one transaction)
-    // =====================================================================
-
-    suspend fun syncFeedFromCentralVaults(): Result<Int> = try {
-        val r = backend.withBackoff(maxAttempts = 4) {
-            backend.apiCall { NexoraNetworkClient.apiService.getFeed() }
-        }
-        when (r) {
-            is BackendResult.Ok -> Result.success(upsertVideos(r.value.videos))
-            BackendResult.NotFound -> Result.success(0)
-            else -> Result.failure(IllegalStateException("feed sync failed: $r"))
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Log.e(TAG, "Feed sync error: ${e.message}")
-        Result.failure(e)
-    }
-
-    suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
-        val id = SessionStore.current()?.nexoraId
-            ?: return Result.failure(IllegalStateException("No signed-in session"))
+    suspend fun syncFeedFromCentralVaults(): Result<Int> {
         return try {
-            when (val r = backend.withBackoff { backend.apiCall { NexoraNetworkClient.apiService.restoreUserProfile(id) } }) {
-                is BackendResult.Ok -> {
-                    val profile = r.value
-                    db.withTransaction {
-                        dao.insertChannel(
-                            ChannelEntity(
-                                channelId = OWN_CHANNEL_ID,
-                                channelName = profile.username.ifBlank { "Zentora Creator" },
-                                avatarUri = profile.avatarUri.ifBlank { DEFAULT_AVATAR_URL },
-                                bannerUri = DEFAULT_BANNER_URL,
-                                subscriberCount = profile.subscriberCount,
-                                isSubscribed = false,
-                                creatorLevel = profile.creatorLevel,
-                                hasZentoraBadge = true,
-                                description = "Official channel of Zentora CLC. Restored from Central Vaults."
-                            )
-                        )
-                        upsertVideos(profile.uploadedVideos)
-                    }
-                    Result.success(true)
-                }
-                BackendResult.NotFound -> Result.success(false) // account exists but nothing uploaded yet
-                else -> Result.failure(IllegalStateException("restore failed: $r"))
+            val response = NexoraNetworkClient.apiService.getFeed()
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(1)
+            } else {
+                Result.success(0)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Account restore error: ${e.message}")
+            Log.e("NexoraAccountSync", "Feed sync error: ${e.message}")
             Result.failure(e)
         }
     }
-
-    suspend fun searchGlobalVaults(query: String) {
-        if (query.isBlank()) return
-        scope.launch {
-            try {
-                val r = backend.withBackoff(maxAttempts = 2) {
-                    backend.apiCall { NexoraNetworkClient.apiService.searchGlobalVideos(query) }
-                }
-                if (r is BackendResult.Ok) upsertVideos(r.value.videos)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Search error: ${e.message}")
-            }
-        }
-    }
-
-    /** One transaction, per-row isolation: one bad row never aborts the batch. Returns rows written. */
-    private suspend fun upsertVideos(items: List<RemoteVideo>): Int = db.withTransaction {
-        var written = 0
-        for (item in items) {
-            try {
-                dao.insertVideo(item.toEntity())   // @Insert(onConflict = REPLACE) / @Upsert, keyed by id
-                ensureInteractionExists(item.id)   // never overwrites local like/watch-later state
-                written++
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Skipping bad video row ${item.id}: ${e.message}")
-            }
-        }
-        written
-    }
-
-    // Rename `RemoteVideo` to the DTO class used by getFeed()/searchGlobalVideos()/restoreUserProfile().
-    private fun RemoteVideo.toEntity() = VideoEntity(
-        id = id,
-        localUri = localUri,
-        title = title,
-        description = description,
-        category = category,
-        tags = tags,
-        timestamp = timestamp,
-        duration = duration,
-        viewCount = viewCount,
-        chapterMarkersJson = chapterMarkersJson,
-        thumbnailUri = thumbnailUri,
-        authorChannelId = authorChannelId,
-        collabChannelId = collabChannelId,
-        isPremiere = isPremiere,
-        premiereScheduledTimeMs = premiereScheduledTimeMs
-    )
 
     private suspend fun ensureInteractionExists(videoId: String) {
         if (dao.getInteractionSync(videoId) == null) {
@@ -341,48 +167,79 @@ class NexoraStreamRepository(private val context: Context) {
         }
     }
 
-    // =====================================================================
-    // PRIVATE PROFILE DATA (phone / billing) – separate, authenticated, never part of recovery
-    // =====================================================================
-
-    suspend fun saveUserDataToCloud(phoneNumber: String, billingInfo: String): Boolean {
-        val token = currentIdToken() ?: return false
-        return backend.withBackoff(maxAttempts = 3) {
-            backend.savePrivate(token, phoneNumber, billingInfo)
-        } is BackendResult.Ok
-    }
-
-    suspend fun restoreUserDataFromCloud(onDataRestored: (phone: String, billing: String) -> Unit) {
-        val token = currentIdToken() ?: return
-        val r = backend.withBackoff(maxAttempts = 3) { backend.fetchPrivate(token) }
-        if (r is BackendResult.Ok) {
-            withContext(Dispatchers.Main) { onDataRestored(r.value.phoneNumber, r.value.billingInfo) }
+    suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
+        return try {
+            val session = SessionStore.current() ?: return Result.failure(IllegalStateException("No session"))
+            val response = NexoraNetworkClient.apiService.restoreUserProfile(session.nexoraId)
+            val profile = response.body()
+            if (response.isSuccessful && profile != null) {
+                val channel = ChannelEntity(
+                    channelId = "ch_zentora_core",
+                    channelName = if (profile.username.isNotBlank()) profile.username else "Zentora Creator",
+                    avatarUri = profile.avatarUri.ifBlank { DEFAULT_AVATAR_URL },
+                    bannerUri = DEFAULT_BANNER_URL,
+                    subscriberCount = profile.subscriberCount,
+                    isSubscribed = false,
+                    creatorLevel = profile.creatorLevel,
+                    hasZentoraBadge = true,
+                    description = "Official channel of Zentora CLC. Restored from Central Vaults."
+                )
+                dao.insertChannel(channel)
+                Result.success(true)
+            } else {
+                Result.success(false)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("NexoraAccountSync", "Account restore error: ${e.message}")
+            Result.failure(e)
         }
     }
 
-    // =====================================================================
-    // INTERACTIONS (Vault 3). Server resolves the user from the bearer token; ids in bodies are not trusted.
-    // =====================================================================
-
-    /** Runs [block] in the background only for a verified session; failures are logged, not silent. */
-    private fun syncInBackground(tag: String, block: suspend (nexoraId: String) -> Unit) {
-        val id = SessionStore.current()?.nexoraId ?: return
-        scope.launch {
-            try {
-                block(id)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "$tag background sync failed: ${e.message}")
+    suspend fun saveUserDataToCloud(userGoogleEmail: String, phoneNumber: String, billingInfo: String) {
+        withContext(Dispatchers.IO) {
+            val session = SessionStore.current() ?: return@withContext
+            val payload = JSONObject().apply {
+                put("email", userGoogleEmail)
+                put("phoneNumber", phoneNumber)
+                put("billingInfo", billingInfo)
+                put("nexoraId", session.nexoraId)
             }
+            postJson("/api/v1/user/save-profile", payload, "NexoraAccountSync")
+        }
+    }
+
+    suspend fun restoreUserDataFromCloud(userGoogleEmail: String, onDataRestored: (String, String) -> Unit) {
+        val profile = fetchCloudProfile(userGoogleEmail) ?: return
+        withContext(Dispatchers.Main) {
+            onDataRestored(profile.phoneNumber, profile.billingInfo)
         }
     }
 
     suspend fun recordView(videoId: String, durationMs: Long, positionMs: Long) {
         dao.incrementViewCount(videoId)
-        dao.insertHistory(HistoryEntity(videoId = videoId, playbackPositionMs = positionMs, timestamp = System.currentTimeMillis()))
-        syncInBackground("view") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(InteractRequest(videoId = videoId, viewDelta = 1L, nexoraId = id))
+        dao.insertHistory(
+            HistoryEntity(
+                videoId = videoId,
+                playbackPositionMs = positionMs,
+                timestamp = System.currentTimeMillis()
+            )
+        )
+        scope.launch {
+            try {
+                val session = SessionStore.current() ?: return@launch
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        viewDelta = 1L,
+                        nexoraId = session.nexoraId
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -423,30 +280,26 @@ class NexoraStreamRepository(private val context: Context) {
             viewCount = 0L,
             chapterMarkersJson = chapterMarkersJson,
             thumbnailUri = thumbnailUri,
-            authorChannelId = OWN_CHANNEL_ID,
-            collabChannelId = collabChannelId,
-            isPremiere = isPremiere,
-            premiereScheduledTimeMs = scheduledTimeMs
+            authorChannelId = "ch_zentora_core",
+            collabChannelId = collabChannelId
         )
         dao.insertVideo(newVideo)
         ensureInteractionExists(newVideo.id)
 
-        // IMPORTANT: `localUri` must already be a REMOTE url (Vault 4 / Cloudinary) before this point,
-        // otherwise the restored video is unplayable after a reinstall. See IMPLEMENTATION_GUIDE.md.
         scope.launch {
-            val token = currentIdToken() ?: return@launch
+            val session = SessionStore.current() ?: return@launch
             val payload = JSONObject().apply {
-                put("videoId", newVideo.id)
                 put("title", title)
                 put("description", description)
                 put("category", category)
                 put("tags", tags)
                 put("videoUrl", localUri)
                 put("thumbnailUrl", thumbnailUri)
-                put("visibility", visibility)
+                put("channelName", "Zentora Creator")
+                put("nexoraId", session.nexoraId)
+                put("email", session.email)
             }
-            val r = backend.withBackoff(maxAttempts = 5) { backend.publishVideo(token, payload) }
-            if (r !is BackendResult.Ok) Log.w(TAG, "Publish not confirmed: $r (queue for WorkManager retry)")
+            postJson("/api/v1/videos/publish", payload, "ZentoraVault")
         }
         return newVideo
     }
@@ -468,10 +321,21 @@ class NexoraStreamRepository(private val context: Context) {
         val newLiked = !current.isLikedByMe
         val newLikes = if (newLiked) current.likesCount + 1 else maxOf(0L, current.likesCount - 1)
         dao.updateInteraction(current.copy(isLikedByMe = newLiked, likesCount = newLikes))
-        syncInBackground("like") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(
-                InteractRequest(videoId = videoId, likeDelta = if (newLiked) 1L else -1L, nexoraId = id)
-            )
+
+        scope.launch {
+            try {
+                val session = SessionStore.current() ?: return@launch
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        likeDelta = if (newLiked) 1L else -1L,
+                        nexoraId = session.nexoraId
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -489,22 +353,29 @@ class NexoraStreamRepository(private val context: Context) {
 
     suspend fun sendSparks(videoId: String, sparks: Long) {
         dao.addSparks(videoId, sparks)
-        syncInBackground("sparks") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(
-                InteractRequest(videoId = videoId, sparksDelta = sparks, nexoraId = id)
-            )
+        scope.launch {
+            try {
+                val session = SessionStore.current() ?: return@launch
+                NexoraNetworkClient.apiService.sendInteraction(
+                    InteractRequest(
+                        videoId = videoId,
+                        sparksDelta = sparks,
+                        nexoraId = session.nexoraId
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
     }
-
-    // =====================================================================
-    // COMMENTS (Vault 5 filter applied before anything is stored or sent)
-    // =====================================================================
 
     fun getComments(videoId: String): Flow<List<CommentEntity>> = dao.getCommentsForVideo(videoId)
 
     suspend fun addComment(videoId: String, authorName: String, text: String): Boolean {
         val isSafe = CommunityShield.isContentSafe(text)
         val sanitized = if (isSafe) text else CommunityShield.filterText(text)
+
         val comment = CommentEntity(
             commentId = "c_${UUID.randomUUID()}",
             videoId = videoId,
@@ -516,17 +387,24 @@ class NexoraStreamRepository(private val context: Context) {
             isLikedByMe = false
         )
         dao.insertComment(comment)
-        syncInBackground("comment") { id ->
-            NexoraNetworkClient.apiService.postComment(
-                PostCommentRequest(
-                    commentId = comment.commentId,
-                    videoId = videoId,
-                    authorName = authorName,
-                    commentText = sanitized,
-                    nexoraId = id,
-                    timestamp = comment.timestamp
+
+        scope.launch {
+            try {
+                val session = SessionStore.current() ?: return@launch
+                NexoraNetworkClient.apiService.postComment(
+                    PostCommentRequest(
+                        commentId = comment.commentId,
+                        videoId = videoId,
+                        authorName = authorName,
+                        commentText = sanitized,
+                        nexoraId = session.nexoraId,
+                        timestamp = comment.timestamp
+                    )
                 )
-            )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
         }
         return isSafe
     }
@@ -537,10 +415,6 @@ class NexoraStreamRepository(private val context: Context) {
         dao.updateComment(comment.copy(isLikedByMe = newLiked, likeCount = newCount))
     }
 
-    // =====================================================================
-    // CHANNELS / NOTES / COMMUNITY / SETTINGS / PRIVATE FRIENDS (unchanged behaviour)
-    // =====================================================================
-
     fun getChannel(channelId: String): Flow<ChannelEntity?> = dao.getChannelById(channelId)
 
     suspend fun toggleSubscribe(channelId: String) {
@@ -548,30 +422,43 @@ class NexoraStreamRepository(private val context: Context) {
         val newSubscribed = !channel.isSubscribed
         val newSubs = if (newSubscribed) channel.subscriberCount + 1 else maxOf(0L, channel.subscriberCount - 1)
         val newLevel = NexoraIdManager.calculateCreatorLevel(newSubs, 0L)
+
         dao.updateChannel(channel.copy(isSubscribed = newSubscribed, subscriberCount = newSubs, creatorLevel = newLevel))
     }
 
     fun getNotes(videoId: String): Flow<List<NotesEntity>> = dao.getNotesForVideo(videoId)
 
     suspend fun addNote(videoId: String, timestampMs: Long, text: String) {
-        dao.insertNote(NotesEntity(noteId = "note_${UUID.randomUUID()}", videoId = videoId, timestampMs = timestampMs, noteText = text))
+        val note = NotesEntity(
+            noteId = "note_${UUID.randomUUID()}",
+            videoId = videoId,
+            timestampMs = timestampMs,
+            noteText = text
+        )
+        dao.insertNote(note)
     }
 
-    suspend fun deleteNote(noteId: String) = dao.deleteNote(noteId)
+    suspend fun deleteNote(noteId: String) {
+        dao.deleteNote(noteId)
+    }
 
-    suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
-        dao.insertCommunityPost(
-            CommunityPostEntity(
-                postId = "post_${UUID.randomUUID()}",
-                channelId = channelId,
-                contentText = contentText,
-                imageUri = imageUri,
-                pollOptionsJson = pollOptionsJson,
-                upvotes = 0L,
-                isUpvotedByMe = false,
-                timestamp = System.currentTimeMillis()
-            )
+    suspend fun createCommunityPost(
+        channelId: String,
+        contentText: String,
+        imageUri: String?,
+        pollOptionsJson: String?
+    ) {
+        val post = CommunityPostEntity(
+            postId = "post_${UUID.randomUUID()}",
+            channelId = channelId,
+            contentText = contentText,
+            imageUri = imageUri,
+            pollOptionsJson = pollOptionsJson,
+            upvotes = 0L,
+            isUpvotedByMe = false,
+            timestamp = System.currentTimeMillis()
         )
+        dao.insertCommunityPost(post)
     }
 
     suspend fun togglePostUpvote(post: CommunityPostEntity) {
@@ -581,48 +468,81 @@ class NexoraStreamRepository(private val context: Context) {
     }
 
     fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
-        if (enteredPin == _masterPin.value) { _isKidsMode.value = enabled; return true }
+        if (enteredPin == _masterPin.value) {
+            _isKidsMode.value = enabled
+            return true
+        }
         return false
     }
 
     fun updateMasterPin(oldPin: String, newPin: String): Boolean {
-        if (oldPin == _masterPin.value && newPin.length == 4) { _masterPin.value = newPin; return true }
+        if (oldPin == _masterPin.value && newPin.length == 4) {
+            _masterPin.value = newPin
+            return true
+        }
         return false
     }
 
-    fun setDataSaver(enabled: Boolean) { _isDataSaver.value = enabled }
+    fun setDataSaver(enabled: Boolean) {
+        _isDataSaver.value = enabled
+    }
 
-    suspend fun clearHistory() = dao.clearHistory()
-    suspend fun removeFromHistory(videoId: String) = dao.deleteHistoryById(videoId)
-    suspend fun upsertChannel(channel: ChannelEntity) = dao.insertChannel(channel)
+    suspend fun clearHistory() {
+        dao.clearHistory()
+    }
+
+    suspend fun removeFromHistory(videoId: String) {
+        dao.deleteHistoryById(videoId)
+    }
+
+    suspend fun upsertChannel(channel: ChannelEntity) {
+        dao.insertChannel(channel)
+    }
 
     val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
+
     suspend fun getPrivateProfile(): PrivateFriendProfileEntity? = dao.getPrivateProfileSync()
+
     suspend fun isHandleTaken(handle: String): Boolean = dao.countHandleOccurrences(handle.trim()) > 0
-    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) = dao.insertPrivateProfile(profile)
-    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) = dao.updatePrivateProfile(profile)
+
+    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.insertPrivateProfile(profile)
+    }
+
+    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) {
+        dao.updatePrivateProfile(profile)
+    }
 
     fun getAllPrivateFriends(): Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
+
     fun searchPrivateFriends(query: String): Flow<List<PrivateFriendEntity>> = dao.searchPrivateFriends(query)
+
     suspend fun getPrivateFriend(handle: String): PrivateFriendEntity? = dao.getPrivateFriendByHandle(handle)
-    suspend fun addPrivateFriend(friend: PrivateFriendEntity) = dao.insertPrivateFriend(friend)
+
+    suspend fun addPrivateFriend(friend: PrivateFriendEntity) {
+        dao.insertPrivateFriend(friend)
+    }
 
     fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> =
         dao.getMessagesForConversation(handle)
 
-    suspend fun sendChatMessage(conversationHandle: String, senderHandle: String, text: String, mediaUri: String? = null) {
-        dao.insertChatMessage(
-            PrivateChatMessageEntity(
-                messageId = "msg_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}",
-                conversationHandle = conversationHandle,
-                senderHandle = senderHandle,
-                text = text,
-                mediaUri = mediaUri,
-                timestamp = System.currentTimeMillis(),
-                isFromMe = true,
-                isRead = true
-            )
+    suspend fun sendChatMessage(
+        conversationHandle: String,
+        senderHandle: String,
+        text: String,
+        mediaUri: String? = null
+    ) {
+        val message = PrivateChatMessageEntity(
+            messageId = "msg_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}",
+            conversationHandle = conversationHandle,
+            senderHandle = senderHandle,
+            text = text,
+            mediaUri = mediaUri,
+            timestamp = System.currentTimeMillis(),
+            isFromMe = true,
+            isRead = true
         )
+        dao.insertChatMessage(message)
     }
 
     suspend fun markConversationAsRead(handle: String) {
@@ -630,10 +550,35 @@ class NexoraStreamRepository(private val context: Context) {
         dao.clearUnreadCount(handle)
     }
 
+    private suspend fun postJson(path: String, payload: JSONObject, logTag: String): Int =
+        withContext(Dispatchers.IO) {
+            var connection: HttpURLConnection? = null
+            try {
+                val url = URL("$BACKEND_BASE_URL$path")
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                    connectTimeout = NETWORK_TIMEOUT_MS
+                    readTimeout = NETWORK_TIMEOUT_MS
+                }
+                connection.outputStream.use { os ->
+                    os.write(payload.toString().toByteArray(Charsets.UTF_8))
+                }
+                connection.responseCode
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(logTag, "POST $path failed: ${e.message}")
+                -1
+            } finally {
+                connection?.disconnect()
+            }
+        }
+
     companion object {
-        private const val TAG = "NexoraAccountSync"
         private const val BACKEND_BASE_URL = "https://nexora-backend-fq54.onrender.com"
-        private const val OWN_CHANNEL_ID = "ch_zentora_core"
+        private const val NETWORK_TIMEOUT_MS = 15000
         private const val DEFAULT_AVATAR_URL =
             "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80"
         private const val DEFAULT_BANNER_URL =
@@ -642,9 +587,10 @@ class NexoraStreamRepository(private val context: Context) {
         @Volatile
         private var INSTANCE: NexoraStreamRepository? = null
 
-        fun getInstance(context: Context): NexoraStreamRepository =
-            INSTANCE ?: synchronized(this) {
+        fun getInstance(context: Context): NexoraStreamRepository {
+            return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: NexoraStreamRepository(context.applicationContext).also { INSTANCE = it }
             }
+        }
     }
 }
