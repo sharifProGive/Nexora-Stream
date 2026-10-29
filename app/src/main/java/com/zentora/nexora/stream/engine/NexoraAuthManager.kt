@@ -3,24 +3,13 @@ package com.zentora.nexora.stream.engine
 
 import android.content.Context
 import android.content.Intent
-import androidx.activity.ComponentActivity
-import androidx.activity.result.ActivityResultLauncher
-import androidx.credentials.CredentialManager
-import androidx.credentials.CustomCredential
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialException
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.zentora.nexora.stream.data.database.entities.ChannelEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.util.UUID
+import com.zentora.nexora.stream.data.repository.RecoveryState
 
 /**
- * NexoraAuthResult:
- * Encapsulates authentication outcomes across Primary (Credential Manager)
- * and Secondary (Fallback Intent) mechanisms.
+ * Outcome of a sign-in attempt.
+ * NeedsIntentFallback is kept so existing screens that handle it still compile; it is never produced any more,
+ * because an account is only ever created from a Google ID token that the Nexora server has verified.
  */
 sealed class NexoraAuthResult {
     data class Success(val displayName: String, val email: String, val avatarUri: String) : NexoraAuthResult()
@@ -29,119 +18,38 @@ sealed class NexoraAuthResult {
 }
 
 /**
- * Robust Google Sign-In Engine with Dual Fallback:
+ * Self-hosted sign-in:
  *
- * Tier 1: AndroidX Credential Manager with GetGoogleIdOption (autoSelectEnabled = false).
- * Tier 2: Secondary Fallback Account Picker / Google Intent when NoCredentialsException
- *         or GetCredentialException is encountered (e.g. non-Play-Store builds, emulators,
- *         or devices without registered passkeys/cloud credentials).
- *
- * Persists user session in Vault 1 (Room DB & SharedPreferences) and pulls cloud restore
- * from Central Vaults 2 & 5.
+ *   1. Google account chooser (Credential Manager) -> signed Google ID token
+ *   2. NexoraStreamRepository.recoverOrRegister:
+ *        GET  /api/v1/account/get-profile   200 -> existing account, original nexoraId (reinstall recovery)
+ *                                           404 -> POST /api/v1/account/register (new account)
+ *        restore profile + videos, then sync the feed
+ *   3. Only then is the Vault 1 session written, so no screen can run before the server confirmed the id.
  */
-class NexoraAuthManager(private val context: Context) {
+class NexoraAuthManager(context: Context) {
 
-    private val credentialManager = CredentialManager.create(context)
-    private val repository = NexoraStreamRepository.getInstance(context)
+    private val appContext: Context = context.applicationContext
+    private val googleAuth = GoogleAuthClient(appContext)
+    private val repository = NexoraStreamRepository.getInstance(appContext)
 
-    /**
-     * Primary Tier: Attempt sign-in via AndroidX Credential Manager.
-     * If NoCredentialsException or GetCredentialException is thrown, triggers fallback handling.
-     */
-    suspend fun signInWithGoogle(activityContext: Context): NexoraAuthResult {
-        return withContext(Dispatchers.IO) {
-            try {
-                // Configure GetGoogleIdOption with autoSelectEnabled = false
-                val googleIdOption = GetGoogleIdOption.Builder()
-                    .setFilterByAuthorizedAccounts(false)
-                    .setServerClientId("zentora-stream-cloud.apps.googleusercontent.com")
-                    .setAutoSelectEnabled(false)
-                    .build()
-
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(googleIdOption)
-                    .build()
-
-                val result = credentialManager.getCredential(
-                    request = request,
-                    context = activityContext
-                )
-
-                val credential = result.credential
-                if (credential is CustomCredential && credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                    val displayName = googleIdTokenCredential.displayName
-                        ?: googleIdTokenCredential.givenName
-                        ?: "Google Creator"
-                    val email = googleIdTokenCredential.id
-                    val photoUrl = googleIdTokenCredential.profilePictureUri?.toString()
-                    val idToken = googleIdTokenCredential.idToken
-
-                    return@withContext completeAuthentication(
-                        displayName = displayName,
-                        email = email,
-                        photoUrl = photoUrl,
-                        idToken = idToken
-                    )
-                } else {
-                    // Fallback to secondary mechanism
-                    return@withContext executeSecondaryFallback(activityContext)
-                }
-            } catch (e: GetCredentialException) {
-                // Catches NoCredentialsException and other credential manager failures
-                return@withContext executeSecondaryFallback(activityContext)
-            } catch (e: Exception) {
-                return@withContext executeSecondaryFallback(activityContext)
+    /** [activityContext] must be the Activity so Google can show its account sheet. */
+    suspend fun signInWithGoogle(activityContext: Context): NexoraAuthResult =
+        when (val result = googleAuth.signIn(activityContext)) {
+            is GoogleSignInResult.Success -> finishSignIn(result.idToken, result.hint)
+            GoogleSignInResult.Cancelled -> {
+                repository.reportSignInCancelled()
+                NexoraAuthResult.Error("Sign-in was cancelled.")
+            }
+            is GoogleSignInResult.Error -> {
+                repository.reportSignInFailure(result.message)
+                NexoraAuthResult.Error(result.message)
             }
         }
-    }
 
     /**
-     * Secondary Tier: Generates the system Account Picker Intent or handles seamless device account selection.
-     */
-    private suspend fun executeSecondaryFallback(activityContext: Context): NexoraAuthResult {
-        return try {
-            // Check if standard Android account picker intent can be dispatched
-            val accountChooserIntent = android.accounts.AccountManager.newChooseAccountIntent(
-                null,
-                null,
-                arrayOf("com.google"),
-                null,
-                null,
-                null,
-                null
-            )
-            // If the device has account picker available, return as fallback intent
-            val resolveInfo = activityContext.packageManager.queryIntentActivities(accountChooserIntent, 0)
-            if (resolveInfo.isNotEmpty()) {
-                NexoraAuthResult.NeedsIntentFallback(accountChooserIntent)
-            } else {
-                // If in headless/emulator test environment without account chooser, provide instant verified session
-                val fallbackEmail = "creator@zentora.stream"
-                val fallbackName = "Zentora Verified Creator"
-                completeAuthentication(
-                    displayName = fallbackName,
-                    email = fallbackEmail,
-                    photoUrl = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80",
-                    idToken = "ZT-DEV-TOKEN-${UUID.randomUUID()}"
-                )
-            }
-        } catch (_: Exception) {
-            // Clean fallback verified session for offline/sandbox
-            val fallbackEmail = "creator@zentora.stream"
-            val fallbackName = "Zentora Stream Creator"
-            completeAuthentication(
-                displayName = fallbackName,
-                email = fallbackEmail,
-                photoUrl = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80",
-                idToken = "ZT-FALLBACK-${UUID.randomUUID()}"
-            )
-        }
-    }
-
-    /**
-     * Completes authentication, updates session in NexoraIdManager,
-     * writes ChannelEntity into Room DB (Vault 1), and triggers Central Cloud restore.
+     * Completes a sign-in for which the caller already holds a Google ID token.
+     * Without a token nothing is created: there are no offline or "demo" accounts.
      */
     suspend fun completeAuthentication(
         displayName: String,
@@ -149,59 +57,71 @@ class NexoraAuthManager(private val context: Context) {
         photoUrl: String?,
         idToken: String?
     ): NexoraAuthResult {
-        return try {
-            // 1. Update In-Memory & Prefs Session in NexoraIdManager
-            NexoraIdManager.loginWithGoogle(
-                context = context,
-                displayName = displayName,
-                email = email,
-                photoUrl = photoUrl,
-                idToken = idToken
-            )
+        if (idToken.isNullOrBlank()) {
+            return NexoraAuthResult.Error("A verified Google sign-in is required to create or restore an account.")
+        }
+        return finishSignIn(idToken, GoogleProfileHint(email = email, displayName = displayName, avatarUri = photoUrl ?: ""))
+    }
 
-            // Save session to SessionStore so repository recovery works perfectly
-            SessionStore.init(context)
-            val currentSession = NexoraIdManager.getSession()
-            SessionStore.save(
-                AccountSession(
-                    nexoraId = currentSession.nexoraId,
-                    email = email,
-                    displayName = displayName,
-                    avatarUri = photoUrl ?: ""
+    /** Browsing without an account. Nothing is uploaded or synced in this mode. */
+    fun activateGuestMode() {
+        NexoraIdManager.activateGuestMode(appContext)
+    }
+
+    /** Removes the account from this phone (local data included). The data on the server is untouched. */
+    suspend fun signOut() {
+        repository.signOut()
+        googleAuth.clearState()
+        NexoraIdManager.clearSession(appContext)
+    }
+
+    private suspend fun finishSignIn(idToken: String, hint: GoogleProfileHint): NexoraAuthResult {
+        return when (val state = repository.recoverOrRegister(idToken, hint)) {
+            is RecoveryState.Ready -> {
+                val session = SessionStore.current()
+                    ?: return NexoraAuthResult.Error("Your session could not be saved. Please try again.")
+                persistVault1Session(session)
+                NexoraAuthResult.Success(
+                    displayName = session.displayName.ifBlank { hint.displayName }.ifBlank { "Nexora Creator" },
+                    email = session.email.ifBlank { hint.email },
+                    avatarUri = session.avatarUri
                 )
-            )
-
-            // 2. Persist user record into Room DB (Vault 1 ChannelEntity)
-            val channel = ChannelEntity(
-                channelId = "ch_zentora_core",
-                channelName = displayName.ifBlank { "Zentora Creator" },
-                avatarUri = photoUrl ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80",
-                bannerUri = "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80",
-                subscriberCount = 0L,
-                isSubscribed = false,
-                creatorLevel = "Rising Creator",
-                hasZentoraBadge = true,
-                description = "Authenticated Nexora Stream channel for $email. Verified by Zentora CLC."
-            )
-            repository.upsertChannel(channel)
-
-            // 3. Restore user's cloud library from Central Vault 2 & 5 (/api/v1/user/sync)
-            repository.restoreAccountFromCentralVaults()
-
-            NexoraAuthResult.Success(
-                displayName = displayName,
-                email = email,
-                avatarUri = photoUrl ?: ""
-            )
-        } catch (e: Exception) {
-            NexoraAuthResult.Error(e.message ?: "Authentication processing failure")
+            }
+            is RecoveryState.Failed -> NexoraAuthResult.Error(state.message)
+            else -> NexoraAuthResult.Error("Sign-in did not finish. Please try again.")
         }
     }
 
     /**
-     * Activates guest mode (anonymous browsing)
+     * Mirrors the confirmed account into the Vault 1 preferences that NexoraIdManager and MainActivity read.
+     * The keys below are the ones NexoraIdManager uses; the id and token written here come from the server.
      */
-    fun activateGuestMode() {
-        NexoraIdManager.activateGuestMode(context)
+    private fun persistVault1Session(session: AccountSession) {
+        val handle = session.handle.ifBlank {
+            "@" + session.email.substringBefore("@").replace(".", "").lowercase().ifBlank { "nexoracreator" }
+        }
+        appContext.getSharedPreferences(VAULT1_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_AUTH_TOKEN, session.sessionToken)
+            .putString(KEY_NEXORA_ID, session.nexoraId)
+            .putString(KEY_USERNAME, session.displayName.ifBlank { "Nexora Creator" })
+            .putString(KEY_EMAIL, session.email)
+            .putString(KEY_HANDLE, handle)
+            .putString(KEY_AVATAR, session.avatarUri)
+            .putBoolean(KEY_IS_GOOGLE, true)
+            .putBoolean(KEY_IS_GUEST, false)
+            .commit()
+        NexoraIdManager.initSession(appContext)
+    }
+
+    private companion object {
+        const val VAULT1_PREFS = "nexora_vault1_session"
+        const val KEY_AUTH_TOKEN = "auth_token"
+        const val KEY_NEXORA_ID = "nexora_id"
+        const val KEY_USERNAME = "username"
+        const val KEY_EMAIL = "email"
+        const val KEY_HANDLE = "handle"
+        const val KEY_AVATAR = "avatar"
+        const val KEY_IS_GOOGLE = "is_google"
+        const val KEY_IS_GUEST = "is_guest"
     }
 }
