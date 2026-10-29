@@ -245,10 +245,10 @@ object NexoraIdManager {
         if (token.isNotBlank() || isGuest) {
             _sessionState.value = NexoraSession(
                 nexoraId = if (nexoraId.isNotBlank()) nexoraId else "NX-${UUID.randomUUID().toString().take(8).uppercase()}",
-                username = prefs.getString(KEY_USERNAME, if (isGuest) "Guest Streamer" else "Zentora CLC") ?: "",
-                email = prefs.getString(KEY_EMAIL, if (isGuest) "guest@zentora.stream" else "core@zentora.org") ?: "",
-                handle = prefs.getString(KEY_HANDLE, if (isGuest) "@guest" else "@zentora") ?: "",
-                avatarUri = prefs.getString(KEY_AVATAR, "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150") ?: "",
+                username = prefs.getString(KEY_USERNAME, if (isGuest) "Guest Streamer" else "") ?: "",
+                email = prefs.getString(KEY_EMAIL, "") ?: "",
+                handle = prefs.getString(KEY_HANDLE, if (isGuest) "@guest" else "") ?: "",
+                avatarUri = prefs.getString(KEY_AVATAR, "") ?: "",
                 isCreatorMode = true,
                 zentoraAuthToken = token,
                 creatorLevel = "Rising Creator",
@@ -286,59 +286,14 @@ object NexoraIdManager {
         )
     }
 
-    /**
-     * Links Google Authentication credentials, persists session in Vault 1 SharedPreferences,
-     * and generates a fresh Zentora Auth Token.
-     */
-    fun loginWithGoogle(
-        context: Context,
-        displayName: String,
-        email: String,
-        photoUrl: String?,
-        idToken: String?
-    ) {
-        val cleanHandle = "@" + (email.substringBefore("@").replace(".", "").lowercase().ifBlank { "zentoracreator" })
-        val newToken = idToken?.ifBlank { null } ?: "ZT-GOOGLE-${UUID.randomUUID()}"
-        val nexoraId = "NX-${UUID.randomUUID().toString().take(8).uppercase()}"
-        val avatar = photoUrl ?: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150"
-        val name = displayName.ifBlank { "Google Creator" }
-
-        val session = NexoraSession(
-            nexoraId = nexoraId,
-            username = name,
-            email = email,
-            handle = cleanHandle,
-            avatarUri = avatar,
-            isCreatorMode = true,
-            zentoraAuthToken = newToken,
-            creatorLevel = "Rising Creator",
-            hasZentoraBadge = true,
-            isSignedInWithGoogle = true,
-            isGuest = false
-        )
-        _sessionState.value = session
-
-        // Save in SharedPreferences for Vault 1 persistence
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .putString(KEY_AUTH_TOKEN, newToken)
-            .putString(KEY_NEXORA_ID, nexoraId)
-            .putString(KEY_USERNAME, name)
-            .putString(KEY_EMAIL, email)
-            .putString(KEY_HANDLE, cleanHandle)
-            .putString(KEY_AVATAR, avatar)
-            .putBoolean(KEY_IS_GOOGLE, true)
-            .putBoolean(KEY_IS_GUEST, false)
-            .apply()
-    }
-
     fun activateGuestMode(context: Context) {
         val nexoraId = "NX-GUEST-${UUID.randomUUID().toString().take(6).uppercase()}"
         val guestSession = NexoraSession(
             nexoraId = nexoraId,
             username = "Guest Streamer",
-            email = "guest@zentora.stream",
+            email = "",
             handle = "@guest",
-            avatarUri = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150",
+            avatarUri = "",
             isCreatorMode = false,
             zentoraAuthToken = "ZT-GUEST-TOKEN",
             creatorLevel = "Guest Explorer",
@@ -352,9 +307,9 @@ object NexoraIdManager {
             .putString(KEY_AUTH_TOKEN, "ZT-GUEST-TOKEN")
             .putString(KEY_NEXORA_ID, nexoraId)
             .putString(KEY_USERNAME, "Guest Streamer")
-            .putString(KEY_EMAIL, "guest@zentora.stream")
+            .putString(KEY_EMAIL, "")
             .putString(KEY_HANDLE, "@guest")
-            .putString(KEY_AVATAR, "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150")
+            .putString(KEY_AVATAR, "")
             .putBoolean(KEY_IS_GOOGLE, false)
             .putBoolean(KEY_IS_GUEST, true)
             .apply()
