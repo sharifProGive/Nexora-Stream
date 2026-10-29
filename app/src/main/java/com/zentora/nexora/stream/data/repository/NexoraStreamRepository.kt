@@ -1,617 +1,327 @@
-/* © 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora. */
-package com.zentora.nexora.stream.data.repository
+    private enum class DrainResult { IDLE, RETRY }
+    private enum class PublishStep { DONE, DROPPED, RETRY, AUTH_FAILED }
 
-import android.content.Context
-import android.util.Log
-import androidx.room.withTransaction
-import com.zentora.nexora.stream.data.database.NexoraDatabase
-import com.zentora.nexora.stream.data.database.entities.*
-import com.zentora.nexora.stream.engine.*
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.util.UUID
-
-// ---------------------------------------------------------------------------
-// Recovery state exposed to the UI ("Restoring your account...")
-// ---------------------------------------------------------------------------
-
-enum class RecoveryStep { VERIFYING, REGISTERING, RESTORING, SYNCING }
-enum class FailureReason { UNAUTHORIZED, SERVER_UNAVAILABLE, UNKNOWN }
-
-sealed interface RecoveryState {
-    data object Idle : RecoveryState
-    data object NeedsSignIn : RecoveryState
-    /** attempt > 1 means the server is cold-starting -> show "Waking up the server...". */
-    data class Restoring(val step: RecoveryStep, val attempt: Int = 1) : RecoveryState
-    data class Ready(val nexoraId: String, val isNewUser: Boolean) : RecoveryState
-    data class Failed(val reason: FailureReason, val message: String) : RecoveryState
-}
-
-class NexoraStreamRepository(private val context: Context) {
-
-    private val db = NexoraDatabase.getInstance(context)
-    private val dao = db.nexoraDao()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val backend = AccountBackend(BACKEND_BASE_URL)
-
-    /** Serialises recovery / background resync so they can never race each other. */
-    private val recoveryMutex = Mutex()
-
-    /** Set from the app layer (silent Google token refresh). Falls back to the last sign-in token. */
-    @Volatile var tokenProvider: IdTokenProvider? = null
-    @Volatile private var cachedIdToken: String? = null
-
-    private val _recoveryState = MutableStateFlow<RecoveryState>(RecoveryState.Idle)
-    val recoveryState: StateFlow<RecoveryState> = _recoveryState.asStateFlow()
-
-    val allVideos: Flow<List<VideoEntity>> = dao.getAllVideos()
-    val allChannels: Flow<List<ChannelEntity>> = dao.getAllChannels()
-    val allHistory: Flow<List<HistoryEntity>> = dao.getAllHistory()
-    val watchLaterInteractions: Flow<List<InteractionEntity>> = dao.getWatchLaterInteractions()
-    val likedInteractions: Flow<List<InteractionEntity>> = dao.getLikedInteractions()
-    val allCommunityPosts: Flow<List<CommunityPostEntity>> = dao.getAllCommunityPosts()
-
-    fun getVideosByAuthor(authorChannelId: String): Flow<List<VideoEntity>> =
-        dao.getVideosByAuthor(authorChannelId)
-
-    private val _isKidsMode = MutableStateFlow(false)
-    val isKidsMode: StateFlow<Boolean> = _isKidsMode.asStateFlow()
-
-    private val _masterPin = MutableStateFlow("1234")
-    val masterPin: StateFlow<String> = _masterPin.asStateFlow()
-
-    private val _isDataSaver = MutableStateFlow(false)
-    val isDataSaver: StateFlow<Boolean> = _isDataSaver.asStateFlow()
-
-    init {
-        SessionStore.init(context)
-        // Only warms the Render instance. NO identity is created and NO recovery runs here any more.
-        scope.launch { backend.warmUp() }
+    private sealed interface UploadStep {
+        data class Ready(val url: String) : UploadStep
+        data object Empty : UploadStep
+        data object Retry : UploadStep
+        data object Auth : UploadStep
+        data class Failed(val reason: String) : UploadStep
     }
 
-    // =====================================================================
-    // SESSION GATE + RECOVERY
-    // =====================================================================
-
-    fun beginSession() {
-        val s = SessionStore.current()
-        if (s == null) {
-            _recoveryState.value = RecoveryState.NeedsSignIn
-        } else {
-            _recoveryState.value = RecoveryState.Ready(s.nexoraId, isNewUser = false)
-            scope.launch { backgroundResync() }
+    /** Starts (or restarts) the queue worker. A worker that is only waiting for its next retry is replaced. */
+    private fun kickPending() {
+        if (SessionStore.current() == null) return
+        synchronized(drainLock) {
+            val running = drainJob
+            if (running != null && running.isActive && drainWorking) return
+            running?.cancel()
+            drainJob = scope.launch { drainPending() }
         }
     }
 
-    fun reportSignInCancelled() {
-        _recoveryState.value = RecoveryState.NeedsSignIn
-    }
-
-    fun reportSignInFailure(message: String) {
-        _recoveryState.value = RecoveryState.Failed(FailureReason.UNAUTHORIZED, message)
-    }
-
-    suspend fun currentIdToken(): String? =
-        tokenProvider?.idToken(false) ?: cachedIdToken
-
-    suspend fun recoverOrRegister(idToken: String, hint: GoogleProfileHint): RecoveryState {
-        cachedIdToken = idToken
-        val result = recoveryMutex.withLock { performRecovery(idToken, hint) }
-        _recoveryState.value = result
-        return result
-    }
-
-    private suspend fun performRecovery(idToken: String, hint: GoogleProfileHint): RecoveryState {
-        try {
-            _recoveryState.value = RecoveryState.Restoring(RecoveryStep.VERIFYING)
-            var isNew = false
-            val identity: CloudIdentity = when (
-                val r = backend.withBackoff(
-                    onRetry = { a -> _recoveryState.value = RecoveryState.Restoring(RecoveryStep.VERIFYING, a) }
-                ) { backend.fetchProfile(idToken) }
-            ) {
-                is BackendResult.Ok -> r.value
-                BackendResult.NotFound -> {
-                    isNew = true
-                    _recoveryState.value = RecoveryState.Restoring(RecoveryStep.REGISTERING)
-                    val reg = backend.withBackoff(
-                        onRetry = { a -> _recoveryState.value = RecoveryState.Restoring(RecoveryStep.REGISTERING, a) }
-                    ) { backend.register(idToken, hint) }
-                    if (reg is BackendResult.Ok) reg.value else return failure(reg)
-                }
-                else -> return failure(r)
+    private suspend fun drainPending() {
+        var round = 0
+        while (true) {
+            drainWorking = true
+            val result = try {
+                processPendingOnce()
+            } finally {
+                drainWorking = false
             }
-
-            SessionStore.save(AccountSession(identity.nexoraId, hint.email, hint.displayName, hint.avatarUri))
-
-            if (isNew) {
-                ensureOwnChannel(hint)
-            } else {
-                _recoveryState.value = RecoveryState.Restoring(RecoveryStep.RESTORING)
-                val restored = restoreAccountFromCentralVaults()
-                if (restored.isFailure) {
-                    return RecoveryState.Failed(
-                        FailureReason.SERVER_UNAVAILABLE,
-                        "Could not restore your account yet. Please try again."
-                    )
-                }
-            }
-
-            _recoveryState.value = RecoveryState.Restoring(RecoveryStep.SYNCING)
-            syncFeedFromCentralVaults().onFailure {
-                Log.w(TAG, "Feed sync failed after recovery: ${it.message}")
-            }
-
-            return RecoveryState.Ready(identity.nexoraId, isNewUser = isNew)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Recovery failed: ${e.message}")
-            return RecoveryState.Failed(FailureReason.UNKNOWN, "Something went wrong. Please try again.")
+            if (result == DrainResult.IDLE || round >= MAX_DRAIN_ROUNDS) return
+            delay(retryDelayMs(round))
+            round += 1
         }
     }
 
-    private fun failure(r: BackendResult<*>): RecoveryState.Failed = when (r) {
-        BackendResult.Unauthorized ->
-            RecoveryState.Failed(FailureReason.UNAUTHORIZED, "We couldn't verify your Google sign-in. Please sign in again.")
-        is BackendResult.Retryable ->
-            RecoveryState.Failed(FailureReason.SERVER_UNAVAILABLE, "The server is not responding. Check your connection and try again.")
-        is BackendResult.Fatal ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Unexpected server response (${r.code}).")
-        BackendResult.NotFound ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Account not found.")
-        is BackendResult.Ok ->
-            RecoveryState.Failed(FailureReason.UNKNOWN, "Unexpected state.")
+    private fun retryDelayMs(round: Int): Long {
+        val ceiling = min(MAX_DRAIN_DELAY_MS, BASE_DRAIN_DELAY_MS shl min(round, 5))
+        return Random.nextLong(ceiling / 2L + 1L, ceiling + 1L)
     }
 
-    private suspend fun backgroundResync() {
-        recoveryMutex.withLock {
-            try {
-                restoreAccountFromCentralVaults()
-                syncFeedFromCentralVaults()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "Background resync failed: ${e.message}")
-            }
-        }
-    }
+    private suspend fun processPendingOnce(): DrainResult {
+        return processMutex.withLock {
+            if (SessionStore.current() == null) return@withLock DrainResult.IDLE
+            var retry = false
 
-    private suspend fun ensureOwnChannel(hint: GoogleProfileHint) {
-        dao.insertChannel(
-            ChannelEntity(
-                channelId = OWN_CHANNEL_ID,
-                channelName = hint.displayName.ifBlank { "Nexora Creator" },
-                avatarUri = hint.avatarUri.ifBlank { DEFAULT_AVATAR_URL },
-                bannerUri = DEFAULT_BANNER_URL,
-                subscriberCount = 0L,
-                isSubscribed = false,
-                creatorLevel = NexoraIdManager.calculateCreatorLevel(0L, 0L),
-                hasZentoraBadge = true,
-                description = "Official channel of Zentora CLC."
-            )
-        )
-    }
-
-    // =====================================================================
-    // REMOTE -> ROOM & SEARCH
-    // =====================================================================
-
-    suspend fun syncFeedFromCentralVaults(): Result<Int> = try {
-        val r = backend.withBackoff(maxAttempts = 4) {
-            backend.apiCall { NexoraNetworkClient.apiService.getFeed() }
-        }
-        when (r) {
-            is BackendResult.Ok -> Result.success(upsertVideos(r.value.videos))
-            BackendResult.NotFound -> Result.success(0)
-            else -> Result.failure(IllegalStateException("feed sync failed: $r"))
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Log.e(TAG, "Feed sync error: ${e.message}")
-        Result.failure(e)
-    }
-
-    suspend fun restoreAccountFromCentralVaults(): Result<Boolean> {
-        val id = SessionStore.current()?.nexoraId
-            ?: return Result.failure(IllegalStateException("No signed-in session"))
-        return try {
-            when (val r = backend.withBackoff { backend.apiCall { NexoraNetworkClient.apiService.restoreUserProfile(id) } }) {
-                is BackendResult.Ok -> {
-                    val profile = r.value
-                    db.withTransaction {
-                        dao.insertChannel(
-                            ChannelEntity(
-                                channelId = OWN_CHANNEL_ID,
-                                channelName = profile.username.ifBlank { "Zentora Creator" },
-                                avatarUri = profile.avatarUri.ifBlank { DEFAULT_AVATAR_URL },
-                                bannerUri = DEFAULT_BANNER_URL,
-                                subscriberCount = profile.subscriberCount,
-                                isSubscribed = false,
-                                creatorLevel = profile.creatorLevel,
-                                hasZentoraBadge = true,
-                                description = "Official channel of Zentora CLC. Restored from Central Vaults."
-                            )
-                        )
-                        upsertVideos(profile.uploadedVideos)
+            for (id in synchronized(pendingLock) { readDeletes() }) {
+                val r = authed(maxAttempts = 2) { token -> backend.deleteVideo(token, id) }
+                    ?: return@withLock DrainResult.IDLE
+                when (r) {
+                    is BackendResult.Ok, BackendResult.NotFound -> removePendingDelete(id)
+                    BackendResult.Unauthorized -> return@withLock DrainResult.IDLE
+                    is BackendResult.Retryable -> retry = true
+                    is BackendResult.Fatal -> {
+                        Log.w(TAG, "Delete of $id was rejected: ${r.message}")
+                        removePendingDelete(id)
                     }
-                    Result.success(true)
                 }
-                BackendResult.NotFound -> Result.success(false)
-                else -> Result.failure(IllegalStateException("restore failed: $r"))
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Account restore error: ${e.message}")
-            Result.failure(e)
-        }
-    }
 
-    suspend fun searchGlobalVaults(query: String) {
-        if (query.isBlank()) return
-        scope.launch {
-            try {
-                val r = backend.withBackoff(maxAttempts = 2) {
-                    backend.apiCall { NexoraNetworkClient.apiService.searchGlobalVideos(query) }
+            val entries = synchronized(pendingLock) { readPublishes() }
+            for (entry in entries) {
+                when (processPublish(entry)) {
+                    PublishStep.DONE, PublishStep.DROPPED -> Unit
+                    PublishStep.RETRY -> retry = true
+                    PublishStep.AUTH_FAILED -> return@withLock DrainResult.IDLE
                 }
-                if (r is BackendResult.Ok) upsertVideos(r.value.videos)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Search error: ${e.message}")
+            }
+            if (retry) DrainResult.RETRY else DrainResult.IDLE
+        }
+    }
+
+    private suspend fun processPublish(entry: PendingPublish): PublishStep {
+        if (entry.failures >= MAX_ENTRY_FAILURES) return dropEntry(entry, "the server kept rejecting the upload")
+
+        if (entry.videoUrl.isBlank()) {
+            when (val step = ensureUploaded(entry, isVideo = true)) {
+                is UploadStep.Ready -> {
+                    entry.videoUrl = step.url
+                    editPending(entry.id) { it.videoUrl = step.url }
+                }
+                UploadStep.Empty -> return dropEntry(entry, "no video file was selected")
+                UploadStep.Retry -> return PublishStep.RETRY
+                UploadStep.Auth -> return PublishStep.AUTH_FAILED
+                is UploadStep.Failed -> return dropEntry(entry, step.reason)
+            }
+        }
+
+        if (entry.thumbUrl.isBlank() && entry.thumbSrc.isNotBlank()) {
+            when (val step = ensureUploaded(entry, isVideo = false)) {
+                is UploadStep.Ready -> {
+                    entry.thumbUrl = step.url
+                    editPending(entry.id) { it.thumbUrl = step.url }
+                }
+                UploadStep.Empty -> Unit
+                UploadStep.Retry -> return PublishStep.RETRY
+                UploadStep.Auth -> return PublishStep.AUTH_FAILED
+                is UploadStep.Failed -> {
+                    Log.w(TAG, "Thumbnail of ${entry.id} was skipped: ${step.reason}")
+                    entry.thumbSrc = ""
+                    editPending(entry.id) { it.thumbSrc = "" }
+                }
+            }
+        }
+
+        val current = loadPending(entry.id) ?: return PublishStep.DROPPED
+        current.videoUrl = entry.videoUrl
+        current.thumbUrl = entry.thumbUrl
+
+        val payload = JSONObject()
+            .put("id", current.id)
+            .put("title", current.title)
+            .put("description", current.description)
+            .put("category", current.category)
+            .put("tags", current.tags)
+            .put("videoUrl", current.videoUrl)
+            .put("visibility", current.visibility)
+            .put("duration", current.duration)
+            .put("chapterMarkersJson", current.chapterMarkersJson)
+            .put("isPremiere", current.isPremiere)
+            .put("timestamp", current.createdAt)
+        if (current.thumbUrl.isNotBlank()) payload.put("thumbnailUrl", current.thumbUrl)
+        if (current.collabChannelId != null) payload.put("collabChannelId", current.collabChannelId)
+        if (current.premiereScheduledTimeMs != null) payload.put("premiereScheduledTimeMs", current.premiereScheduledTimeMs)
+
+        val r = authed(maxAttempts = 3) { token -> backend.publishVideo(token, payload) }
+            ?: return PublishStep.AUTH_FAILED
+        return when (r) {
+            is BackendResult.Ok -> {
+                finishPublished(current, r.value)
+                PublishStep.DONE
+            }
+            BackendResult.Unauthorized -> PublishStep.AUTH_FAILED
+            is BackendResult.Retryable -> PublishStep.RETRY
+            BackendResult.NotFound -> dropEntry(current, "the server could not find the account")
+            is BackendResult.Fatal -> {
+                if (r.code == 400 && r.message.contains(ATTACH_FAILED_MARKER)) {
+                    // The server no longer has the uploaded file (for example after a host reset): upload it again.
+                    val reset = editPending(current.id) {
+                        it.videoUrl = ""
+                        it.thumbUrl = ""
+                        it.videoUploadId = ""
+                        it.thumbUploadId = ""
+                        it.failures += 1
+                    }
+                    if (reset == null) PublishStep.DROPPED else PublishStep.RETRY
+                } else {
+                    dropEntry(current, r.message)
+                }
             }
         }
     }
 
-    private suspend fun upsertVideos(items: List<RemoteVideo>): Int = db.withTransaction {
-        var written = 0
-        for (item in items) {
-            try {
-                dao.insertVideo(item.toEntity())
-                ensureInteractionExists(item.id)
-                written++
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Skipping bad video row ${item.id}: ${e.message}")
+    private suspend fun ensureUploaded(entry: PendingPublish, isVideo: Boolean): UploadStep {
+        var source = if (isVideo) entry.videoSrc else entry.thumbSrc
+        if (source.isBlank()) return UploadStep.Empty
+        if (isRemoteUrl(source)) return UploadStep.Ready(source)
+
+        if (source.startsWith("content://")) {
+            val copy = withContext(Dispatchers.IO) { copyToPending(entry.id, if (isVideo) "video" else "thumb", source) }
+                ?: return UploadStep.Failed("the selected file could not be read any more")
+            source = copy.absolutePath
+            val stored = editPending(entry.id) { if (isVideo) it.videoSrc = copy.absolutePath else it.thumbSrc = copy.absolutePath }
+                ?: return UploadStep.Failed("the video was removed")
+            if (isVideo) entry.videoSrc = stored.videoSrc else entry.thumbSrc = stored.thumbSrc
+        }
+
+        val payload = payloadForFile(source) ?: return UploadStep.Failed("the file is no longer available on this phone")
+        val resumeId = (if (isVideo) entry.videoUploadId else entry.thumbUploadId).ifBlank { null }
+        val token = SessionStore.current()?.sessionToken ?: return UploadStep.Auth
+
+        val result = backend.uploadMedia(
+            sessionToken = token,
+            kind = if (isVideo) "video" else "image",
+            payload = payload,
+            resumeUploadId = resumeId,
+            onUploadSession = { uploadId ->
+                editPending(entry.id) { if (isVideo) it.videoUploadId = uploadId else it.thumbUploadId = uploadId }
+                if (isVideo) entry.videoUploadId = uploadId else entry.thumbUploadId = uploadId
+            },
+            onProgress = { sent, total -> if (isVideo) reportProgress(entry.id, sent, total) }
+        )
+        if (isVideo) clearProgress(entry.id)
+
+        return when (result) {
+            is BackendResult.Ok -> UploadStep.Ready(result.value.url)
+            BackendResult.NotFound -> {
+                // The server forgot this upload session: start a fresh one next time.
+                editPending(entry.id) {
+                    if (isVideo) it.videoUploadId = "" else it.thumbUploadId = ""
+                    it.failures += 1
+                }
+                if (isVideo) entry.videoUploadId = "" else entry.thumbUploadId = ""
+                entry.failures += 1
+                UploadStep.Retry
             }
-        }
-        written
-    }
-
-    private fun RemoteVideo.toEntity() = VideoEntity(
-        id = id,
-        localUri = localUri,
-        title = title,
-        description = description,
-        category = category,
-        tags = tags,
-        timestamp = timestamp,
-        duration = duration,
-        viewCount = viewCount,
-        chapterMarkersJson = chapterMarkersJson,
-        thumbnailUri = thumbnailUri,
-        authorChannelId = authorChannelId,
-        collabChannelId = collabChannelId,
-        isPremiere = isPremiere,
-        premiereScheduledTimeMs = premiereScheduledTimeMs
-    )
-
-    private suspend fun ensureInteractionExists(videoId: String) {
-        if (dao.getInteractionSync(videoId) == null) {
-            dao.insertInteraction(
-                InteractionEntity(
-                    videoId = videoId,
-                    likesCount = 0L,
-                    dislikesCount = 0L,
-                    isLikedByMe = false,
-                    isDislikedByMe = false,
-                    savedToWatchLater = false,
-                    sparksReceived = 0L
-                )
-            )
-        }
-    }
-
-    // =====================================================================
-    // PRIVATE PROFILE & INTERACTIONS
-    // =====================================================================
-
-    suspend fun saveUserDataToCloud(phoneNumber: String, billingInfo: String): Boolean {
-        val token = currentIdToken() ?: return false
-        return backend.withBackoff(maxAttempts = 3) {
-            backend.savePrivate(token, phoneNumber, billingInfo)
-        } is BackendResult.Ok
-    }
-
-    suspend fun restoreUserDataFromCloud(onDataRestored: (phone: String, billing: String) -> Unit) {
-        val token = currentIdToken() ?: return
-        val r = backend.withBackoff(maxAttempts = 3) { backend.fetchPrivate(token) }
-        if (r is BackendResult.Ok) {
-            withContext(Dispatchers.Main) { onDataRestored(r.value.phoneNumber, r.value.billingInfo) }
-        }
-    }
-
-    private fun syncInBackground(tag: String, block: suspend (nexoraId: String) -> Unit) {
-        val id = SessionStore.current()?.nexoraId ?: return
-        scope.launch {
-            try {
-                block(id)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "$tag background sync failed: ${e.message}")
+            BackendResult.Unauthorized -> {
+                handleUnauthorized()
+                UploadStep.Auth
             }
+            is BackendResult.Retryable -> UploadStep.Retry
+            is BackendResult.Fatal -> UploadStep.Failed(result.message)
         }
     }
 
-    suspend fun recordView(videoId: String, durationMs: Long, positionMs: Long) {
-        dao.incrementViewCount(videoId)
-        dao.insertHistory(HistoryEntity(videoId = videoId, playbackPositionMs = positionMs, timestamp = System.currentTimeMillis()))
-        syncInBackground("view") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(InteractRequest(videoId = videoId, viewDelta = 1L, nexoraId = id))
-        }
-    }
-
-    suspend fun uploadVideo(
-        title: String,
-        description: String,
-        category: String,
-        tags: String,
-        localUri: String,
-        thumbnailUri: String,
-        collabChannelId: String? = null,
-        isPremiere: Boolean = false,
-        scheduledTimeMs: Long? = null,
-        duration: Long = 60000L,
-        chapterMarkersJson: String = "[]",
-        visibility: String = "Public",
-        isMadeForKids: Boolean = false,
-        isAgeRestricted: Boolean = false,
-        location: String = "",
-        shortsRemixing: String = "Allow video and audio remixing",
-        commentsModeration: String = "On (Strict)",
-        showLikesCount: Boolean = true,
-        containsPaidPromotion: Boolean = false,
-        videoLanguage: String = "English",
-        licenseType: String = "Standard Nexora License",
-        allowEmbedding: Boolean = true,
-        notifySubscribers: Boolean = true
-    ): VideoEntity {
-        val newVideo = VideoEntity(
-            id = "vid_${UUID.randomUUID()}",
-            localUri = localUri,
-            title = title,
-            description = description,
-            category = category,
-            tags = tags,
-            timestamp = System.currentTimeMillis(),
-            duration = duration,
-            viewCount = 0L,
-            chapterMarkersJson = chapterMarkersJson,
-            thumbnailUri = thumbnailUri,
-            authorChannelId = OWN_CHANNEL_ID,
-            collabChannelId = collabChannelId,
-            isPremiere = isPremiere,
-            premiereScheduledTimeMs = scheduledTimeMs
+    private suspend fun finishPublished(entry: PendingPublish, published: ServerVideo) {
+        removePending(entry.id)
+        deleteTemp(entry.videoSrc)
+        deleteTemp(entry.thumbSrc)
+        clearProgress(entry.id)
+        val local = dao.getVideoByIdSync(entry.id) ?: return
+        val videoFile = localFile(local.localUri)
+        val thumbFile = localFile(local.thumbnailUri)
+        dao.updateVideo(
+            local.copy(
+                localUri = if (videoFile != null && !videoFile.isFile) published.localUri else local.localUri,
+                thumbnailUri = when {
+                    published.thumbnailUri.isBlank() -> local.thumbnailUri
+                    local.thumbnailUri.isBlank() || (thumbFile != null && !thumbFile.isFile) -> published.thumbnailUri
+                    else -> local.thumbnailUri
+                }
+            )
         )
-        dao.insertVideo(newVideo)
-        ensureInteractionExists(newVideo.id)
-
-        scope.launch {
-            val token = currentIdToken() ?: return@launch
-            val payload = JSONObject().apply {
-                put("videoId", newVideo.id)
-                put("title", title)
-                put("description", description)
-                put("category", category)
-                put("tags", tags)
-                put("videoUrl", localUri)
-                put("thumbnailUrl", thumbnailUri)
-                put("visibility", visibility)
-            }
-            val r = backend.withBackoff(maxAttempts = 5) { backend.publishVideo(token, payload) }
-            if (r !is BackendResult.Ok) Log.w(TAG, "Publish not confirmed: $r")
-        }
-        return newVideo
     }
 
-    suspend fun updateVideoMetadata(id: String, title: String, description: String, category: String, tags: String) {
-        val existing = dao.getVideoByIdSync(id) ?: return
-        dao.updateVideo(existing.copy(title = title, description = description, category = category, tags = tags))
+    private fun dropEntry(entry: PendingPublish, reason: String): PublishStep {
+        removePending(entry.id)
+        deleteTemp(entry.videoSrc)
+        deleteTemp(entry.thumbSrc)
+        clearProgress(entry.id)
+        val name = entry.title.ifBlank { "your video" }
+        _syncError.value = "\"$name\" could not be uploaded: $reason."
+        Log.w(TAG, "Dropped queued publish ${entry.id}: $reason")
+        return PublishStep.DROPPED
     }
 
-    suspend fun deleteVideo(id: String) {
-        dao.deleteVideoById(id)
-        dao.deleteHistoryById(id)
+    private fun reportProgress(videoId: String, sent: Long, total: Long) {
+        if (total <= 0L) return
+        val fraction = (sent.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f)
+        val previous = _uploadProgress.value[videoId]
+        if (previous != null && fraction < 1f && fraction - previous < 0.01f) return
+        _uploadProgress.value = _uploadProgress.value + (videoId to fraction)
     }
 
-    fun getInteraction(videoId: String): Flow<InteractionEntity?> = dao.getInteraction(videoId)
-
-    suspend fun toggleLike(videoId: String) {
-        val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
-        val newLiked = !current.isLikedByMe
-        val newLikes = if (newLiked) current.likesCount + 1 else maxOf(0L, current.likesCount - 1)
-        dao.updateInteraction(current.copy(isLikedByMe = newLiked, likesCount = newLikes))
-        syncInBackground("like") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(
-                InteractRequest(videoId = videoId, likeDelta = if (newLiked) 1L else -1L, nexoraId = id)
-            )
-        }
-    }
-
-    suspend fun toggleDislike(videoId: String) {
-        val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
-        val newDisliked = !current.isDislikedByMe
-        val newDislikes = if (newDisliked) current.dislikesCount + 1 else maxOf(0L, current.dislikesCount - 1)
-        dao.updateInteraction(current.copy(isDislikedByMe = newDisliked, dislikesCount = newDislikes))
-    }
-
-    suspend fun toggleWatchLater(videoId: String) {
-        val current = dao.getInteractionSync(videoId) ?: InteractionEntity(videoId)
-        dao.updateInteraction(current.copy(savedToWatchLater = !current.savedToWatchLater))
-    }
-
-    suspend fun sendSparks(videoId: String, sparks: Long) {
-        dao.addSparks(videoId, sparks)
-        syncInBackground("sparks") { id ->
-            NexoraNetworkClient.apiService.sendInteraction(
-                InteractRequest(videoId = videoId, sparksDelta = sparks, nexoraId = id)
-            )
-        }
+    private fun clearProgress(videoId: String) {
+        if (_uploadProgress.value.containsKey(videoId)) _uploadProgress.value = _uploadProgress.value - videoId
     }
 
     // =====================================================================
-    // COMMENTS & OTHER ENTITIES
+    // FILE HELPERS
     // =====================================================================
 
-    fun getComments(videoId: String): Flow<List<CommentEntity>> = dao.getCommentsForVideo(videoId)
+    private fun pendingDir(): File = File(context.filesDir, "pending_uploads")
 
-    suspend fun addComment(videoId: String, authorName: String, text: String): Boolean {
-        val isSafe = CommunityShield.isContentSafe(text)
-        val sanitized = if (isSafe) text else CommunityShield.filterText(text)
-        val comment = CommentEntity(
-            commentId = "c_${UUID.randomUUID()}",
-            videoId = videoId,
-            authorName = authorName,
-            commentText = sanitized,
-            timestamp = System.currentTimeMillis(),
-            likeCount = 0L,
-            isFiltered = !isSafe,
-            isLikedByMe = false
-        )
-        dao.insertComment(comment)
-        syncInBackground("comment") { id ->
-            NexoraNetworkClient.apiService.postComment(
-                PostCommentRequest(
-                    commentId = comment.commentId,
-                    videoId = videoId,
-                    authorName = authorName,
-                    commentText = sanitized,
-                    nexoraId = id,
-                    timestamp = comment.timestamp
-                )
-            )
+    private fun isRemoteUrl(value: String): Boolean = value.startsWith("https://") || value.startsWith("http://")
+
+    private fun localFile(uri: String): File? = when {
+        uri.startsWith("file://") -> Uri.parse(uri).path?.let { File(it) }
+        uri.startsWith("/") -> File(uri)
+        else -> null
+    }
+
+    private fun payloadForFile(path: String): MediaPayload? {
+        val file = localFile(path) ?: return null
+        if (!file.isFile || !file.canRead()) return null
+        val length = file.length()
+        if (length <= 0L) return null
+        return MediaPayload(length) { FileInputStream(file) }
+    }
+
+    /** A content:// uri can lose its read permission when the app restarts, so the bytes are kept in app storage. */
+    private fun copyToPending(videoId: String, label: String, source: String): File? {
+        return try {
+            val dir = pendingDir()
+            if (!dir.isDirectory && !dir.mkdirs()) return null
+            val destination = File(dir, "${videoId}_$label")
+            val input = context.contentResolver.openInputStream(Uri.parse(source)) ?: return null
+            input.use { stream -> destination.outputStream().use { out -> stream.copyTo(out) } }
+            destination
+        } catch (e: IOException) {
+            Log.w(TAG, "Could not copy $label of $videoId: ${e.message}")
+            null
+        } catch (e: SecurityException) {
+            Log.w(TAG, "No permission to read $label of $videoId: ${e.message}")
+            null
         }
-        return isSafe
     }
 
-    suspend fun toggleCommentLike(comment: CommentEntity) {
-        val newLiked = !comment.isLikedByMe
-        val newCount = if (newLiked) comment.likeCount + 1 else maxOf(0L, comment.likeCount - 1)
-        dao.updateComment(comment.copy(isLikedByMe = newLiked, likeCount = newCount))
-    }
-
-    fun getChannel(channelId: String): Flow<ChannelEntity?> = dao.getChannelById(channelId)
-
-    suspend fun toggleSubscribe(channelId: String) {
-        val channel = dao.getChannelByIdSync(channelId) ?: return
-        val newSubscribed = !channel.isSubscribed
-        val newSubs = if (newSubscribed) channel.subscriberCount + 1 else maxOf(0L, channel.subscriberCount - 1)
-        val newLevel = NexoraIdManager.calculateCreatorLevel(newSubs, 0L)
-        dao.updateChannel(channel.copy(isSubscribed = newSubscribed, subscriberCount = newSubs, creatorLevel = newLevel))
-    }
-
-    fun getNotes(videoId: String): Flow<List<NotesEntity>> = dao.getNotesForVideo(videoId)
-
-    suspend fun addNote(videoId: String, timestampMs: Long, text: String) {
-        dao.insertNote(NotesEntity(noteId = "note_${UUID.randomUUID()}", videoId = videoId, timestampMs = timestampMs, noteText = text))
-    }
-
-    suspend fun deleteNote(noteId: String) = dao.deleteNote(noteId)
-
-    suspend fun createCommunityPost(channelId: String, contentText: String, imageUri: String?, pollOptionsJson: String?) {
-        dao.insertCommunityPost(
-            CommunityPostEntity(
-                postId = "post_${UUID.randomUUID()}",
-                channelId = channelId,
-                contentText = contentText,
-                imageUri = imageUri,
-                pollOptionsJson = pollOptionsJson,
-                upvotes = 0L,
-                isUpvotedByMe = false,
-                timestamp = System.currentTimeMillis()
-            )
-        )
-    }
-
-    suspend fun togglePostUpvote(post: CommunityPostEntity) {
-        val newUpvoted = !post.isUpvotedByMe
-        val newCount = if (newUpvoted) post.upvotes + 1 else maxOf(0L, post.upvotes - 1)
-        dao.updateCommunityPost(post.copy(isUpvotedByMe = newUpvoted, upvotes = newCount))
-    }
-
-    fun setKidsMode(enabled: Boolean, enteredPin: String): Boolean {
-        if (enteredPin == _masterPin.value) { _isKidsMode.value = enabled; return true }
-        return false
-    }
-
-    fun updateMasterPin(oldPin: String, newPin: String): Boolean {
-        if (oldPin == _masterPin.value && newPin.length == 4) { _masterPin.value = newPin; return true }
-        return false
-    }
-
-    fun setDataSaver(enabled: Boolean) { _isDataSaver.value = enabled }
-
-    suspend fun clearHistory() = dao.clearHistory()
-    suspend fun removeFromHistory(videoId: String) = dao.deleteHistoryById(videoId)
-    suspend fun upsertChannel(channel: ChannelEntity) = dao.insertChannel(channel)
-
-    val privateProfile: Flow<PrivateFriendProfileEntity?> = dao.getPrivateProfile()
-    suspend fun getPrivateProfile(): PrivateFriendProfileEntity? = dao.getPrivateProfileSync()
-    suspend fun isHandleTaken(handle: String): Boolean = dao.countHandleOccurrences(handle.trim()) > 0
-    suspend fun savePrivateProfile(profile: PrivateFriendProfileEntity) = dao.insertPrivateProfile(profile)
-    suspend fun updatePrivateProfile(profile: PrivateFriendProfileEntity) = dao.updatePrivateProfile(profile)
-
-    val getAllPrivateFriends: Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
-    fun searchPrivateFriends(query: String): Flow<List<PrivateFriendEntity>> = dao.searchPrivateFriends(query)
-    suspend fun getPrivateFriend(handle: String): PrivateFriendEntity? = dao.getPrivateFriendByHandle(handle)
-    suspend fun addPrivateFriend(friend: PrivateFriendEntity) = dao.insertPrivateFriend(friend)
-
-    fun getMessagesForConversation(handle: String): Flow<List<PrivateChatMessageEntity>> =
-        dao.getMessagesForConversation(handle)
-
-    suspend fun sendChatMessage(conversationHandle: String, senderHandle: String, text: String, mediaUri: String? = null) {
-        dao.insertChatMessage(
-            PrivateChatMessageEntity(
-                messageId = "msg_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}",
-                conversationHandle = conversationHandle,
-                senderHandle = senderHandle,
-                text = text,
-                mediaUri = mediaUri,
-                timestamp = System.currentTimeMillis(),
-                isFromMe = true,
-                isRead = true
-            )
-        )
-    }
-
-    suspend fun markConversationAsRead(handle: String) {
-        dao.markMessagesAsRead(handle)
-        dao.clearUnreadCount(handle)
+    private fun deleteTemp(path: String) {
+        if (path.isBlank()) return
+        val file = File(path)
+        try {
+            if (file.parentFile?.canonicalPath == pendingDir().canonicalPath && file.exists()) file.delete()
+        } catch (e: IOException) {
+            Log.w(TAG, "Could not delete temporary file: ${e.message}")
+        }
     }
 
     companion object {
-        private const val TAG = "NexoraAccountSync"
+        private const val TAG = "NexoraRepository"
         private const val BACKEND_BASE_URL = "https://nexora-backend-fq54.onrender.com"
         private const val OWN_CHANNEL_ID = "ch_zentora_core"
-        private const val DEFAULT_AVATAR_URL =
-            "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80"
-        private const val DEFAULT_BANNER_URL =
-            "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80"
+
+        private const val VAULT1_PREFS = "nexora_vault1_session"
+        private const val KEY_AUTH_TOKEN = "auth_token"
+        private const val KEY_IS_GUEST = "is_guest"
+
+        private const val PENDING_PREFS = "nexora_pending_sync"
+        private const val K_PUBLISH_QUEUE = "publish_queue"
+        private const val K_DELETE_QUEUE = "delete_queue"
+
+        private const val FEED_PAGE_SIZE = 50
+        private const val FEED_PAGES = 3
+        private const val MAX_SPARKS_PER_CALL = 1000L
+        private const val COMMENT_REFRESH_INTERVAL_MS = 15_000L
+
+        private const val MAX_ENTRY_FAILURES = 10
+        private const val MAX_DRAIN_ROUNDS = 8
+        private const val BASE_DRAIN_DELAY_MS = 15_000L
+        private const val MAX_DRAIN_DELAY_MS = 5 * 60_000L
+
+        /** Part of the message AccountBackend produces for the server error "invalid_video_url". */
+        private const val ATTACH_FAILED_MARKER = "could not be attached"
 
         @Volatile
         private var INSTANCE: NexoraStreamRepository? = null
