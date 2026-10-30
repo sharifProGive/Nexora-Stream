@@ -141,7 +141,7 @@ fun NexoraNavHost(
     }
 
     // TopBar & BottomBar visibility logic
-    val showTopBar = currentRoute in listOf("home", "subscriptions", "you")
+    val showTopBar = currentRoute in listOf("home", "subscriptions")
     val showBottomBar = currentRoute in listOf("home", "shorts", "subscriptions", "you")
 
     Scaffold(
@@ -274,7 +274,8 @@ fun NexoraNavHost(
                         },
                         onSettingsClick = { currentRoute = "settings" },
                         onNotificationClick = { currentRoute = "notifications_screen" },
-                        onManageVideos = { currentRoute = "manage_videos" }
+                        onManageVideos = { currentRoute = "manage_videos" },
+                        onFriendsClick = { currentRoute = "friends_gateway" }
                     )
                 }
                 "channel" -> {
