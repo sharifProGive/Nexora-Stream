@@ -532,12 +532,7 @@ fun PlayerScreen(
                 }
 
                 if (!isAdActive) {
-                    FloatingReactionContainer(
-                        modifier = Modifier.fillMaxSize(),
-                        onReactionSent = { em ->
-                            Toast.makeText(context, "Reaction $em broadcasted!", Toast.LENGTH_SHORT).show()
-                        }
-                    )
+                    // FloatingReactionContainer removed successfully here.
 
                     doubleTapFeedback?.let { fb ->
                         Box(
