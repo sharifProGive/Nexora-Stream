@@ -33,6 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.zentora.nexora.stream.data.database.entities.ChannelEntity
 import com.zentora.nexora.stream.data.database.entities.VideoEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 
@@ -69,101 +70,43 @@ fun NotificationsScreen(
     var selectedFilter by remember { mutableStateOf(NotificationFilter.ALL) }
     val allVideos: List<VideoEntity> by repository.allVideos.collectAsState(initial = emptyList())
 
-    // Generate notification list combining video uploads and user interactions
+    val allChannels: List<ChannelEntity> by repository.allChannels.collectAsState(initial = emptyList())
+
     var hiddenNotificationIds by remember { mutableStateOf(setOf<String>()) }
     var readNotificationIds by remember { mutableStateOf(setOf<String>()) }
 
-    val notifications = remember(allVideos, hiddenNotificationIds, readNotificationIds) {
-        val list = mutableListOf<NotificationItemUi>()
+    // Only real events are listed: new videos published by other creators, newest first.
+    val notifications = remember(allVideos, allChannels, hiddenNotificationIds, readNotificationIds) {
+        val now = System.currentTimeMillis()
+        val startOfToday = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val channelsById = allChannels.associateBy { it.channelId }
 
-        // Video alerts from repository
-        allVideos.take(6).forEachIndexed { index, video ->
-            val isToday = index < 3
-            val timeText = when (index) {
-                0 -> "45m ago"
-                1 -> "2h ago"
-                2 -> "5h ago"
-                3 -> "Yesterday"
-                4 -> "2 days ago"
-                else -> "4 days ago"
-            }
-            list.add(
+        allVideos
+            .filter { it.authorChannelId != "ch_zentora_core" }
+            .sortedByDescending { it.timestamp }
+            .take(30)
+            .map { video ->
+                val channel = channelsById[video.authorChannelId]
+                val id = "notif_vid_${video.id}"
                 NotificationItemUi(
-                    id = "notif_vid_${video.id}",
+                    id = id,
                     type = NotificationFilter.ALL,
-                    channelName = if (video.authorChannelId == "ch_zentora_core") "Zentora" else "Nexora Creator",
-                    channelAvatar = "https://picsum.photos/seed/${video.id}_avatar/100/100",
+                    channelName = channel?.channelName.orEmpty(),
+                    channelAvatar = channel?.avatarUri.orEmpty(),
                     message = "uploaded: ${video.title}",
-                    timestampText = timeText,
-                    isToday = isToday,
+                    timestampText = relativeTimeText(now, video.timestamp),
+                    isToday = video.timestamp >= startOfToday,
                     videoId = video.id,
                     videoThumbnail = video.thumbnailUri.ifBlank { video.localUri },
-                    isRead = readNotificationIds.contains("notif_vid_${video.id}")
+                    isRead = readNotificationIds.contains(id)
                 )
-            )
-        }
-
-        // Mentions
-        list.add(
-            NotificationItemUi(
-                id = "notif_mention_1",
-                type = NotificationFilter.MENTIONS,
-                channelName = "Tech Insights",
-                channelAvatar = "https://picsum.photos/seed/tech_avatar/100/100",
-                message = "mentioned you in a comment: \"Check this performance breakdown!\"",
-                timestampText = "3h ago",
-                isToday = true,
-                videoId = allVideos.firstOrNull()?.id,
-                videoThumbnail = allVideos.firstOrNull()?.thumbnailUri,
-                isRead = readNotificationIds.contains("notif_mention_1")
-            )
-        )
-        list.add(
-            NotificationItemUi(
-                id = "notif_mention_2",
-                type = NotificationFilter.MENTIONS,
-                channelName = "Kotlin Systems Lab",
-                channelAvatar = "https://picsum.photos/seed/lab_avatar/100/100",
-                message = "tagged your channel in a community post",
-                timestampText = "Yesterday",
-                isToday = false,
-                videoId = null,
-                videoThumbnail = null,
-                isRead = readNotificationIds.contains("notif_mention_2")
-            )
-        )
-
-        // Comments
-        list.add(
-            NotificationItemUi(
-                id = "notif_comment_1",
-                type = NotificationFilter.COMMENTS,
-                channelName = "Alex Rivera",
-                channelAvatar = "https://picsum.photos/seed/alex_avatar/100/100",
-                message = "commented: \"Super smooth 4K playback and clean UI!\"",
-                timestampText = "1h ago",
-                isToday = true,
-                videoId = allVideos.firstOrNull()?.id,
-                videoThumbnail = allVideos.firstOrNull()?.thumbnailUri,
-                isRead = readNotificationIds.contains("notif_comment_1")
-            )
-        )
-        list.add(
-            NotificationItemUi(
-                id = "notif_comment_2",
-                type = NotificationFilter.COMMENTS,
-                channelName = "Sarah Chen",
-                channelAvatar = "https://picsum.photos/seed/sarah_avatar/100/100",
-                message = "replied to your comment: \"Agreed, the new stream engine is blazing fast.\"",
-                timestampText = "3 days ago",
-                isToday = false,
-                videoId = allVideos.getOrNull(1)?.id,
-                videoThumbnail = allVideos.getOrNull(1)?.thumbnailUri,
-                isRead = readNotificationIds.contains("notif_comment_2")
-            )
-        )
-
-        list.filterNot { hiddenNotificationIds.contains(it.id) }
+            }
+            .filterNot { hiddenNotificationIds.contains(it.id) }
     }
 
     val filteredNotifications = remember(notifications, selectedFilter) {
@@ -513,5 +456,21 @@ private fun NotificationRowItem(
                 )
             }
         }
+    }
+}
+
+private fun relativeTimeText(now: Long, then: Long): String {
+    val diff = (now - then).coerceAtLeast(0L)
+    val minutes = diff / 60_000L
+    val hours = minutes / 60L
+    val days = hours / 24L
+    return when {
+        minutes < 1L -> "Just now"
+        minutes < 60L -> "${minutes}m ago"
+        hours < 24L -> "${hours}h ago"
+        days == 1L -> "Yesterday"
+        days < 30L -> "$days days ago"
+        days < 365L -> "${days / 30L} months ago"
+        else -> "${days / 365L} years ago"
     }
 }
