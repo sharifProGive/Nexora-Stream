@@ -96,8 +96,10 @@ fun YouProfileScreen(
         allVideos.filter { it.authorChannelId == "ch_zentora_core" }
     }
 
-    val channelDisplayName = userSession.username.ifBlank { "Zentora CLC" }
-    val channelHandle = userSession.handle.ifBlank { "@zentora" }
+    val allChannels by repository.allChannels.collectAsState(initial = emptyList())
+
+    val channelDisplayName = userSession.username.ifBlank { "Your channel" }
+    val channelHandle = userSession.handle
 
     val authManager = remember { com.zentora.nexora.stream.engine.NexoraAuthManager(context) }
 
@@ -115,15 +117,8 @@ fun YouProfileScreen(
                         }
                     }
                     is com.zentora.nexora.stream.engine.NexoraAuthResult.NeedsIntentFallback -> {
-                        authManager.completeAuthentication(
-                            displayName = "Zentora Verified Creator",
-                            email = "creator@zentora.stream",
-                            photoUrl = null,
-                            idToken = null
-                        )
                         withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Signed in as Zentora Verified Creator", Toast.LENGTH_SHORT).show()
-                            showAccountSheet = false
+                            Toast.makeText(context, "Google sign-in could not be started. Please try again.", Toast.LENGTH_SHORT).show()
                         }
                     }
                     is com.zentora.nexora.stream.engine.NexoraAuthResult.Error -> {
@@ -379,7 +374,7 @@ fun YouProfileScreen(
                             Column {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = "Friends & Messages",
+                                        text = "Chat with Friends",
                                         style = MaterialTheme.typography.titleMedium.copy(
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 15.sp
@@ -402,7 +397,7 @@ fun YouProfileScreen(
                                 }
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "Encrypted messaging, calls & contacts",
+                                    text = "Private messages and calls with your friends",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color.Gray,
                                     fontSize = 12.sp
@@ -462,6 +457,7 @@ fun YouProfileScreen(
                                 HistoryCardItem(
                                     video = video,
                                     history = hist,
+                                    channelName = allChannels.firstOrNull { it.channelId == video.authorChannelId }?.channelName.orEmpty(),
                                     onClick = { onVideoClick(video.id) }
                                 )
                             }
@@ -616,7 +612,7 @@ fun YouProfileScreen(
                             .border(1.5.dp, NexoraZentoraBlue, CircleShape)
                     ) {
                         AsyncImage(
-                            model = userSession.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150" },
+                            model = userSession.avatarUri,
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
@@ -689,6 +685,7 @@ fun YouProfileScreen(
 fun HistoryCardItem(
     video: VideoEntity,
     history: HistoryEntity,
+    channelName: String,
     onClick: () -> Unit
 ) {
     val progressFraction = if (video.duration > 0) (history.playbackPositionMs.toFloat() / video.duration.toFloat()).coerceIn(0f, 1f) else 0f
@@ -760,7 +757,7 @@ fun HistoryCardItem(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "Zentora CLC",
+                    text = channelName,
                     color = Color.Gray,
                     fontSize = 10.sp,
                     maxLines = 1
