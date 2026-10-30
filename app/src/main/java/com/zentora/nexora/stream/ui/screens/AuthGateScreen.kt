@@ -1,10 +1,7 @@
 /* © 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora. */
 package com.zentora.nexora.stream.ui.screens
 
-import android.app.Activity
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.Image
@@ -60,41 +57,6 @@ fun AuthGateScreen(
     val authManager = remember { NexoraAuthManager(context) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    // Intent fallback launcher for secondary account chooser tier
-    val fallbackLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            val accountName = result.data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
-                ?: "Zentora Stream Creator"
-            scope.launch {
-                isLoading = true
-                val authResult = authManager.completeAuthentication(
-                    displayName = accountName.substringBefore("@").replace(".", " ").capitalize(),
-                    email = if (accountName.contains("@")) accountName else "$accountName@gmail.com",
-                    photoUrl = "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200",
-                    idToken = null
-                )
-                isLoading = false
-                when (authResult) {
-                    is NexoraAuthResult.Success -> {
-                        Toast.makeText(context, "Welcome, ${authResult.displayName}!", Toast.LENGTH_SHORT).show()
-                        onAuthenticated()
-                    }
-                    is NexoraAuthResult.Error -> {
-                        errorMessage = authResult.message
-                    }
-                    is NexoraAuthResult.NeedsIntentFallback -> {
-                        // Already in fallback
-                    }
-                }
-            }
-        } else {
-            // User dismissed chooser or cancelled, provide guest option
-            isLoading = false
-        }
-    }
 
     Box(
         modifier = Modifier
@@ -274,18 +236,7 @@ fun AuthGateScreen(
                                     onAuthenticated()
                                 }
                                 is NexoraAuthResult.NeedsIntentFallback -> {
-                                    try {
-                                        fallbackLauncher.launch(result.intent)
-                                    } catch (_: Exception) {
-                                        // Directly complete fallback
-                                        authManager.completeAuthentication(
-                                            displayName = "Zentora Stream Creator",
-                                            email = "creator@zentora.stream",
-                                            photoUrl = null,
-                                            idToken = null
-                                        )
-                                        onAuthenticated()
-                                    }
+                                    errorMessage = "Google sign-in could not be started. Please try again."
                                 }
                                 is NexoraAuthResult.Error -> {
                                     errorMessage = result.message
