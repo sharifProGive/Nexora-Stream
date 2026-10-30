@@ -22,7 +22,7 @@ import kotlinx.coroutines.CancellationException
  * an Android OAuth client for package com.zentora.nexora.stream with your signing key's SHA-1.
  */
 object NexoraAuthConfig {
-    const val GOOGLE_WEB_CLIENT_ID: String = "PASTE_YOUR_WEB_CLIENT_ID.apps.googleusercontent.com"
+    const val GOOGLE_WEB_CLIENT_ID: String = "964170248475-g12f50i33chfrdeg97q1v5hhk7l3atfn.apps.googleusercontent.com"
 
     val isConfigured: Boolean
         get() = GOOGLE_WEB_CLIENT_ID.endsWith(".apps.googleusercontent.com") &&
