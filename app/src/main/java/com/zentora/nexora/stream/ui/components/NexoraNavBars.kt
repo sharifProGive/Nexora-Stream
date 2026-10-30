@@ -241,19 +241,41 @@ fun NexoraStreamBottomNavBar(
             )
         )
 
-        // 5. Friends Tab (Pillar 4: Private Friends Enclave & Dual Identity)
-        val isFriendsSelected = currentRoute in listOf("friends_gateway", "friends", "chat_detail")
+        // 5. You Tab: profile. "Chat with Friends" is opened from inside the profile.
+        val isYouSelected = currentRoute in listOf("you", "friends_gateway", "friends", "chat_detail", "call_screen")
         NavigationBarItem(
             icon = {
-                Icon(
-                    imageVector = if (isFriendsSelected) Icons.Filled.People else Icons.Outlined.People,
-                    contentDescription = "Friends",
-                    modifier = Modifier.size(24.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .border(
+                            width = if (isYouSelected) 2.dp else 1.dp,
+                            color = if (isYouSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (userAvatarUri.isNotBlank()) {
+                        AsyncImage(
+                            model = userAvatarUri,
+                            contentDescription = "You",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (isYouSelected) Icons.Filled.Person else Icons.Outlined.Person,
+                            contentDescription = "You",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             },
-            label = { Text("Friends", fontSize = 10.sp, fontWeight = if (isFriendsSelected) FontWeight.Bold else FontWeight.Normal) },
-            selected = isFriendsSelected,
-            onClick = { onNavigate("friends_gateway") },
+            label = { Text("You", fontSize = 10.sp, fontWeight = if (isYouSelected) FontWeight.Bold else FontWeight.Normal) },
+            selected = isYouSelected,
+            onClick = { onNavigate("you") },
+            modifier = Modifier.testTag("bottom_nav_you"),
             colors = NavigationBarItemDefaults.colors(
                 selectedIconColor = MaterialTheme.colorScheme.onSurface,
                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
