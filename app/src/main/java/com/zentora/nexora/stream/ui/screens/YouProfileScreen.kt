@@ -52,7 +52,7 @@ import kotlinx.coroutines.withContext
 
 /**
  * YouTube-style 'You' Screen matching exact design:
- * - Top bar: "Accounts v" pill + Cast, Notifications, Search, Settings icons.
+ * - Top bar: "Accounts v" pill + Notifications and Settings icons.
  * - Header: Large circular avatar with gradient border, Channel Name, @handle,
  *   white pill "View channel", dark pill "Switch account".
  * - Feature: Dedicated Friends & Chat Quick Access Hub.
@@ -78,7 +78,7 @@ fun YouProfileScreen(
     val watchLaterList by repository.watchLaterInteractions.collectAsState(initial = emptyList())
     val likedList by repository.likedInteractions.collectAsState(initial = emptyList())
 
-    var libraryFilter by remember { mutableStateOf("Recent") }
+    var expandedLibrary by remember { mutableStateOf<String?>(null) }
     var showAccountSheet by remember { mutableStateOf(false) }
     var isSigningIn by remember { mutableStateOf(false) }
 
@@ -89,6 +89,14 @@ fun YouProfileScreen(
                 Pair(video, hist)
             }
         }
+    }
+
+    // Real liked / watch-later videos resolved from the interaction tables
+    val likedVideos = remember(likedList, allVideos) {
+        likedList.mapNotNull { interaction -> allVideos.find { it.id == interaction.videoId } }
+    }
+    val watchLaterVideos = remember(watchLaterList, allVideos) {
+        watchLaterList.mapNotNull { interaction -> allVideos.find { it.id == interaction.videoId } }
     }
 
     // User's own videos in Room DB
@@ -112,7 +120,7 @@ fun YouProfileScreen(
                 when (result) {
                     is com.zentora.nexora.stream.engine.NexoraAuthResult.Success -> {
                         withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Welcome, ${result.displayName}! Cloud Vaults Restored.", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Welcome, ${result.displayName}!", Toast.LENGTH_LONG).show()
                             showAccountSheet = false
                         }
                     }
@@ -138,6 +146,8 @@ fun YouProfileScreen(
     }
 
     Scaffold(
+        modifier = Modifier.premiumGlow(),
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = {
@@ -157,20 +167,14 @@ fun YouProfileScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {}) {
-                        Icon(Icons.Outlined.Cast, contentDescription = "Cast", tint = Color.White)
-                    }
                     IconButton(onClick = onNotificationClick, modifier = Modifier.testTag("you_notifications_button")) {
                         Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = Color.White)
-                    }
-                    IconButton(onClick = {}) {
-                        Icon(Icons.Outlined.Search, contentDescription = "Search", tint = Color.White)
                     }
                     IconButton(onClick = onSettingsClick, modifier = Modifier.testTag("settings_gear_button")) {
                         Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = Color.White)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         }
     ) { paddingValues ->
@@ -178,7 +182,6 @@ fun YouProfileScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .background(MaterialTheme.colorScheme.background)
         ) {
             // ==================== 1. USER PROFILE HEADER ====================
             item {
@@ -290,13 +293,10 @@ fun YouProfileScreen(
 
                 // Prominent "Continue with Google" card if not signed in with Google
                 if (!userSession.isSignedInWithGoogle) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFF1E1E28),
+                    PremiumCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 8.dp)
-                            .border(1.dp, Color(0xFF33334D), RoundedCornerShape(14.dp))
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
                             Text(
@@ -335,16 +335,11 @@ fun YouProfileScreen(
                 }
 
                 // ==================== ZENTORA FRIENDS & MESSAGES HUB ====================
-                Card(
-                    onClick = { onFriendsClick() },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color(0xFF1E1E28)
-                    ),
+                PremiumCard(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .border(1.dp, Color(0xFF33334D), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    onClick = { onFriendsClick() }
                 ) {
                     Row(
                         modifier = Modifier
@@ -354,20 +349,13 @@ fun YouProfileScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(CircleShape)
-                                    .background(NexoraRed.copy(alpha = 0.18f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.PeopleAlt,
-                                    contentDescription = "Friends Hub",
-                                    tint = NexoraRed,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
+                            PremiumIconBadge(
+                                icon = Icons.Filled.PeopleAlt,
+                                tint = NexoraRed,
+                                badgeSize = 46.dp,
+                                iconSize = 24.dp,
+                                contentDescription = "Friends Hub"
+                            )
 
                             Spacer(modifier = Modifier.width(14.dp))
 
@@ -423,7 +411,6 @@ fun YouProfileScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { /* View all history */ }
                             .padding(horizontal = 16.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -431,13 +418,6 @@ fun YouProfileScreen(
                             text = "History",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             color = Color.White
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Filled.ChevronRight,
-                            contentDescription = "View all",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -479,75 +459,34 @@ fun YouProfileScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "Playlists",
+                            text = "Library",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             color = Color.White
                         )
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { /* View all playlists */ }
-                        ) {
-                            Text("View all", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf("Recent", "Playlists", "Music").forEach { pill ->
-                            val isSelected = libraryFilter == pill
-                            Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = if (isSelected) Color.White else Color(0xFF222222),
-                                modifier = Modifier.clickable { libraryFilter = pill }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = pill,
-                                        color = if (isSelected) Color.Black else Color.White,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 12.sp
-                                    )
-                                    if (pill == "Recent") {
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Icon(
-                                            Icons.Filled.KeyboardArrowDown,
-                                            contentDescription = null,
-                                            tint = if (isSelected) Color.Black else Color.White,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     // Stacked playlist cards
                     PlaylistStackedRowItem(
                         title = "Liked videos",
-                        subtitle = "${likedList.size} videos",
+                        subtitle = "${likedVideos.size} videos",
                         iconBadge = Icons.Filled.ThumbUp,
                         cardColor = Color(0xFF243B55),
-                        onClick = {}
+                        onClick = { expandedLibrary = if (expandedLibrary == "liked") null else "liked" }
                     )
-
-                    PlaylistStackedRowItem(
-                        title = "Downloads",
-                        subtitle = "0 recommendations",
-                        iconBadge = Icons.Filled.DownloadDone,
-                        cardColor = Color(0xFF2A2A2A),
-                        onClick = {}
-                    )
+                    if (expandedLibrary == "liked") {
+                        if (likedVideos.isEmpty()) {
+                            Text(
+                                text = "You have not liked any video yet",
+                                color = Color.Gray,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        } else {
+                            likedVideos.forEach { video ->
+                                LibraryVideoRow(video = video, onClick = { onVideoClick(video.id) })
+                            }
+                        }
+                    }
 
                     PlaylistStackedRowItem(
                         title = "Your videos",
@@ -559,19 +498,25 @@ fun YouProfileScreen(
 
                     PlaylistStackedRowItem(
                         title = "Watch later",
-                        subtitle = "${watchLaterList.size} videos",
+                        subtitle = "${watchLaterVideos.size} videos",
                         iconBadge = Icons.Filled.WatchLater,
                         cardColor = Color(0xFF3A2424),
-                        onClick = {}
+                        onClick = { expandedLibrary = if (expandedLibrary == "later") null else "later" }
                     )
-
-                    PlaylistStackedRowItem(
-                        title = "Sounds",
-                        subtitle = "0 sounds",
-                        iconBadge = Icons.Filled.MusicNote,
-                        cardColor = Color(0xFF33203A),
-                        onClick = {}
-                    )
+                    if (expandedLibrary == "later") {
+                        if (watchLaterVideos.isEmpty()) {
+                            Text(
+                                text = "Nothing saved to watch later yet",
+                                color = Color.Gray,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        } else {
+                            watchLaterVideos.forEach { video ->
+                                LibraryVideoRow(video = video, onClick = { onVideoClick(video.id) })
+                            }
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(40.dp))
@@ -658,7 +603,7 @@ fun YouProfileScreen(
                                 if (restored) {
                                     Toast.makeText(context, "Account data successfully restored!", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    Toast.makeText(context, "Cloud library synchronized.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "No saved cloud data was found for this account.", Toast.LENGTH_SHORT).show()
                                 }
                                 showAccountSheet = false
                             }
@@ -763,15 +708,6 @@ fun HistoryCardItem(
                     maxLines = 1
                 )
             }
-
-            IconButton(
-                onClick = {},
-                modifier = Modifier
-                    .size(20.dp)
-                    .padding(top = 2.dp)
-            ) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "Options", tint = Color.Gray, modifier = Modifier.size(16.dp))
-            }
         }
     }
 }
@@ -842,9 +778,53 @@ fun PlaylistStackedRowItem(
                 color = Color.Gray
             )
         }
+    }
+}
 
-        IconButton(onClick = {}, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.Filled.MoreVert, contentDescription = "Options", tint = Color.Gray, modifier = Modifier.size(18.dp))
+@Composable
+private fun LibraryVideoRow(
+    video: VideoEntity,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .width(112.dp)
+                .height(63.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF222222))
+        ) {
+            AsyncImage(
+                model = video.thumbnailUri.ifBlank { video.localUri },
+                contentDescription = video.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = video.title,
+                color = Color.White,
+                fontWeight = FontWeight.Medium,
+                fontSize = 13.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "${formatMsToTime(video.duration)} • ${video.viewCount} views",
+                color = Color.Gray,
+                fontSize = 11.sp
+            )
         }
     }
 }
