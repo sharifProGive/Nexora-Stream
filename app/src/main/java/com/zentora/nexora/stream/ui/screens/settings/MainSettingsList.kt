@@ -96,7 +96,7 @@ fun MainSettingsList(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box {
                                 AsyncImage(
-                                    model = session.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150" },
+                                    model = session.avatarUri,
                                     contentDescription = "Avatar",
                                     modifier = Modifier
                                         .size(48.dp)
