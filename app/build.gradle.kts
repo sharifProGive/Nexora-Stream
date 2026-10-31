@@ -4,7 +4,6 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
 }
 
 android {
@@ -69,13 +68,6 @@ android {
     includeInApk = false
     includeInBundle = true
   }
-}
-
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
 
 dependencies {
