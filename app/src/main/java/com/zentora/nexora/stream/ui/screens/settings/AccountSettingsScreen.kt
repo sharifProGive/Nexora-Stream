@@ -82,7 +82,7 @@ fun AccountSettingsScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box {
                                 AsyncImage(
-                                    model = session.avatarUri.ifBlank { "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150" },
+                                    model = session.avatarUri,
                                     contentDescription = "Avatar",
                                     modifier = Modifier
                                         .size(54.dp)
@@ -132,18 +132,6 @@ fun AccountSettingsScreen(
                     subtitle = "Two-step verification prompt, password, recovery",
                     tag = "account_to_security_tile",
                     onClick = { navController.navigate("settings/general/account_security") }
-                )
-            }
-
-            item {
-                SettingNavigationTile(
-                    icon = Icons.Outlined.Devices,
-                    title = "Manage Linked Devices",
-                    subtitle = "This device (Android App), Web session",
-                    tag = "manage_devices_tile",
-                    onClick = {
-                        Toast.makeText(context, "Current device active. No unrecognized logins.", Toast.LENGTH_SHORT).show()
-                    }
                 )
             }
 
