@@ -82,14 +82,14 @@ fun ChannelScreen(
     val fallbackChannel = remember(channelId) {
         ChannelEntity(
             channelId = channelId,
-            channelName = "Zentora CLC",
-            avatarUri = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80",
-            bannerUri = "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=1200&auto=format&fit=crop&q=80",
+            channelName = "",
+            avatarUri = "",
+            bannerUri = "",
             subscriberCount = 0L,
             isSubscribed = false,
-            creatorLevel = "Rising Creator",
-            hasZentoraBadge = true,
-            description = "Official channel of Zentora CLC. Next-generation media systems, distributed software platforms, and audio-visual engineering."
+            creatorLevel = "",
+            hasZentoraBadge = false,
+            description = ""
         )
     }
 
@@ -112,9 +112,6 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {}) {
-                        Icon(Icons.Outlined.Search, contentDescription = "Search channel")
-                    }
                     IconButton(
                         onClick = {
                             val handle = "@${currentChannel.channelName.lowercase().replace(" ", "_")}"
@@ -149,10 +146,6 @@ fun ChannelScreen(
                                 leadingIcon = {
                                     Icon(Icons.Outlined.Share, contentDescription = null)
                                 }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Settings") },
-                                onClick = { showOptionsMenu = false }
                             )
                         }
                     }
@@ -464,33 +457,16 @@ fun ChannelScreen(
 
                 ChannelSubTab.PLAYLISTS -> {
                     item {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(NexoraRedDark),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(Icons.Filled.PlaylistPlay, contentDescription = null, tint = Color.White, modifier = Modifier.size(28.dp))
-                                    }
-                                    Spacer(modifier = Modifier.width(14.dp))
-                                    Column {
-                                        Text("Uploaded Streams", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                        Text("${channelVideos.size} items • Created by channel", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(40.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Filled.PlaylistPlay, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(40.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("No playlists yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -544,8 +520,8 @@ fun ChannelScreen(
                         modifier = Modifier.weight(1f)
                     )
                     AnalyticsStatCard(
-                        title = "Storage Status",
-                        value = "Cloud Synced",
+                        title = "Videos",
+                        value = "${channelVideos.size}",
                         modifier = Modifier.weight(1f)
                     )
                 }
