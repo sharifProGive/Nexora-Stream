@@ -32,6 +32,9 @@ import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.ui.components.ParentalControlDialog
 import com.zentora.nexora.stream.ui.theme.NexoraRed
+import com.zentora.nexora.stream.ui.theme.PremiumCard
+import com.zentora.nexora.stream.ui.theme.PremiumIconBadge
+import com.zentora.nexora.stream.ui.theme.premiumGlow
 import com.zentora.nexora.stream.ui.theme.NexoraVerifiedTick
 
 /**
@@ -58,6 +61,7 @@ fun MainSettingsList(
     var showAboutDialog by remember { mutableStateOf(false) }
 
     Scaffold(
+        modifier = Modifier.premiumGlow(),
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -69,10 +73,10 @@ fun MainSettingsList(
                     }
                 },
                 title = { Text("Settings", fontWeight = FontWeight.Bold, fontSize = 20.sp) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = Color.Transparent
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
@@ -83,14 +87,12 @@ fun MainSettingsList(
         ) {
             // Profile & Account Summary Card
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(12.dp),
+                PremiumCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .clickable { navController.navigate("settings/account") }
-                        .testTag("settings_profile_card")
+                        .testTag("settings_profile_card"),
+                    onClick = { navController.navigate("settings/account") }
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -288,15 +290,10 @@ private fun SettingsCategoryRow(
             .testTag(tag),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(24.dp)
-        )
+        PremiumIconBadge(icon = icon)
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontWeight = FontWeight.Medium, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
             Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (trailingWidget != null) {
