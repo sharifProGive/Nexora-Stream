@@ -34,12 +34,13 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.PrivateFriendEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
+import com.zentora.nexora.stream.ui.theme.premiumGlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * FriendsScreen (Pillar 4: WhatsApp-style Private Friends Enclave & Chat Directory).
+ * FriendsScreen (Pillar 4: Premium Private Friends Enclave & Chat Directory).
  * Isolated from global search. When empty, strictly shows pure empty state:
  * "No private conversations yet. Search friends by handle to chat and call."
  */
@@ -67,6 +68,7 @@ fun FriendsScreen(
     val friendsList by friendsFlow.collectAsState(initial = emptyList())
 
     Scaffold(
+        modifier = Modifier.premiumGlow(),
         topBar = {
             TopAppBar(
                 title = {
@@ -80,7 +82,7 @@ fun FriendsScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFF1E1E1E)
+                            color = Color(0x3300B0FF)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -115,10 +117,10 @@ fun FriendsScreen(
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F0F0F))
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         },
-        containerColor = Color(0xFF0F0F0F)
+        containerColor = Color.Transparent
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -146,9 +148,9 @@ fun FriendsScreen(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
                     focusedBorderColor = Color(0xFF3EA6FF),
-                    unfocusedBorderColor = Color(0xFF222222),
-                    focusedContainerColor = Color(0xFF181818),
-                    unfocusedContainerColor = Color(0xFF181818)
+                    unfocusedBorderColor = Color(0x3300E5FF),
+                    focusedContainerColor = Color(0xCC14161E),
+                    unfocusedContainerColor = Color(0xCC14161E)
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -223,7 +225,7 @@ fun FriendsScreen(
                             }
                         )
                         HorizontalDivider(
-                            color = Color(0xFF1E1E1E),
+                            color = Color(0x2200E5FF),
                             modifier = Modifier.padding(start = 76.dp)
                         )
                     }
@@ -273,7 +275,6 @@ fun FriendsScreen(
                         value = newNameInput,
                         onValueChange = { newNameInput = it },
                         label = { Text("Display Name") },
-                        placeholder = { Text("e.g. Jordan") },
                         singleLine = true,
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
@@ -297,10 +298,10 @@ fun FriendsScreen(
                                         handle = cleanHandle,
                                         displayName = name,
                                         avatarUri = "",
-                                        statusBio = "Nexora Private Contact",
-                                        lastMessage = "Started a conversation",
+                                        statusBio = "",
+                                        lastMessage = "",
                                         lastMessageTimestamp = System.currentTimeMillis(),
-                                        isOnline = true
+                                        isOnline = false
                                     )
                                 )
                                 showAddFriendDialog = false
@@ -350,7 +351,8 @@ fun PrivateFriendRow(
             modifier = Modifier
                 .size(48.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF282828)),
+                .background(Color(0xFF1C2230))
+                .border(1.5.dp, Color(0x6600E5FF), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             if (friend.avatarUri.isNotBlank()) {
@@ -425,7 +427,7 @@ fun PrivateFriendRow(
                         modifier = Modifier
                             .size(18.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF2BA640)),
+                            .background(Color(0xFF00B0FF)),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
