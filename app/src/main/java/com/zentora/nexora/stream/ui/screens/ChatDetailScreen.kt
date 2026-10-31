@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,13 +18,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -35,12 +37,13 @@ import coil.compose.AsyncImage
 import com.zentora.nexora.stream.data.database.entities.PrivateChatMessageEntity
 import com.zentora.nexora.stream.data.database.entities.PrivateFriendEntity
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
+import com.zentora.nexora.stream.ui.theme.premiumGlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * WhatsApp-style Private Chat Detail Screen (Pillar 4).
+ * Premium Private Chat Detail Screen (Pillar 4).
  * Voice & Video call buttons at the top, attachment (+) button on the left,
  * send button on the right, and encrypted local message store.
  */
@@ -89,6 +92,7 @@ fun ChatDetailScreen(
     val friendName = friend?.displayName ?: friendHandle.removePrefix("@")
 
     Scaffold(
+        modifier = Modifier.premiumGlow(),
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -171,10 +175,10 @@ fun ChatDetailScreen(
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E1E1E))
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         },
-        containerColor = Color(0xFF0F0F0F)
+        containerColor = Color.Transparent
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -204,7 +208,7 @@ fun ChatDetailScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF1E1E1E))
+                        .background(Color(0xE60F131C))
                         .padding(horizontal = 16.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -238,7 +242,7 @@ fun ChatDetailScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF1E1E1E))
+                    .background(Color(0xE60F131C))
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -273,8 +277,8 @@ fun ChatDetailScreen(
                         unfocusedTextColor = Color.White,
                         focusedBorderColor = Color.Transparent,
                         unfocusedBorderColor = Color.Transparent,
-                        focusedContainerColor = Color(0xFF2B2B2B),
-                        unfocusedContainerColor = Color(0xFF2B2B2B)
+                        focusedContainerColor = Color(0xFF1C2230),
+                        unfocusedContainerColor = Color(0xFF1C2230)
                     ),
                     maxLines = 4
                 )
@@ -303,7 +307,7 @@ fun ChatDetailScreen(
                         }
                     },
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (canSend) Color(0xFF2BA640) else Color(0xFF333333),
+                        containerColor = if (canSend) Color(0xFF00B0FF) else Color(0xFF333333),
                         contentColor = Color.White
                     ),
                     modifier = Modifier
@@ -331,19 +335,31 @@ fun ChatMessageBubble(
         sdf.format(Date(message.timestamp))
     }
 
+    val bubbleShape = RoundedCornerShape(
+        topStart = 16.dp,
+        topEnd = 16.dp,
+        bottomStart = if (isFromMe) 16.dp else 3.dp,
+        bottomEnd = if (isFromMe) 3.dp else 16.dp
+    )
+    val bubbleStyle = if (isFromMe) {
+        Modifier.background(
+            brush = Brush.linearGradient(listOf(Color(0xFF0072FF), Color(0xFF00B0FF))),
+            shape = bubbleShape
+        )
+    } else {
+        Modifier
+            .background(Color(0xFF1C2230), bubbleShape)
+            .border(1.dp, Color(0x3300E5FF), bubbleShape)
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isFromMe) Arrangement.End else Arrangement.Start
     ) {
-        Surface(
-            shape = RoundedCornerShape(
-                topStart = 14.dp,
-                topEnd = 14.dp,
-                bottomStart = if (isFromMe) 14.dp else 2.dp,
-                bottomEnd = if (isFromMe) 2.dp else 14.dp
-            ),
-            color = if (isFromMe) Color(0xFF005C4B) else Color(0xFF202C33), // Authentic WhatsApp palette
-            modifier = Modifier.widthIn(max = 280.dp)
+        Box(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .then(bubbleStyle)
         ) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                 if (!message.mediaUri.isNullOrBlank()) {
@@ -385,9 +401,9 @@ fun ChatMessageBubble(
                     if (isFromMe) {
                         Spacer(modifier = Modifier.width(3.dp))
                         Icon(
-                            imageVector = Icons.Default.DoneAll,
-                            contentDescription = "Read",
-                            tint = Color(0xFF53BDEB),
+                            imageVector = Icons.Default.Done,
+                            contentDescription = "Saved",
+                            tint = Color.White.copy(alpha = 0.7f),
                             modifier = Modifier.size(14.dp)
                         )
                     }
