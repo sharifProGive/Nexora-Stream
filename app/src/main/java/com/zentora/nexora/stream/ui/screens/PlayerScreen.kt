@@ -222,7 +222,7 @@ fun PlayerScreen(
         withContext(Dispatchers.IO) {
             var connection: HttpURLConnection? = null
             try {
-                val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/ads/pre-roll")
+                val url = URL("https://nexora-backend-fq54.onrender.com/api/v1/ads/next")
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 3500
@@ -230,24 +230,20 @@ fun PlayerScreen(
                 }
                 if (connection.responseCode == 200) {
                     val respText = connection.inputStream.bufferedReader().use { it.readText() }
-                    val json = JSONObject(respText)
-                    if (json.optBoolean("hasAd", false) && json.has("ad")) {
-                        val adObj = json.getJSONObject("ad")
+                    val adObj = JSONObject(respText).optJSONObject("ad")
+                    if (adObj != null) {
                         val rawMediaUrl = adObj.optString("adMediaUrl", "").trim()
-                        if (rawMediaUrl.isNotEmpty()) {
-                            val totalDur = adObj.optInt("totalAdDurationSeconds", 15).coerceIn(5, 90)
-                            val skipAfter = adObj.optInt("skippableAfterSeconds", 9).coerceIn(5, 10)
-                            val skippable = if (totalDur <= 10) false else adObj.optBoolean("isSkippable", true)
-
+                        if (rawMediaUrl.startsWith("https://")) {
+                            val skipAfter = adObj.optInt("skippableAfterSeconds", 5).coerceIn(0, 30)
                             fetchedAd = NexoraAdData(
-                                adId = adObj.optString("adId", "ZT-AD-LIVE"),
-                                title = adObj.optString("title", "Sponsored"),
-                                sponsorName = adObj.optString("sponsorName", "Official Partner"),
+                                adId = adObj.optString("adId", ""),
+                                title = adObj.optString("title", ""),
+                                sponsorName = adObj.optString("sponsorName", ""),
                                 adMediaUrl = rawMediaUrl,
                                 clickThroughUrl = adObj.optString("clickThroughUrl", "").trim(),
-                                isSkippable = skippable,
-                                skippableAfterSeconds = if (skippable) skipAfter else totalDur,
-                                totalAdDurationSeconds = totalDur
+                                isSkippable = true,
+                                skippableAfterSeconds = skipAfter,
+                                totalAdDurationSeconds = 120
                             )
                         }
                     }
@@ -259,16 +255,12 @@ fun PlayerScreen(
             }
         }
 
-        val finalAd = fetchedAd ?: NexoraAdData(
-            adId = "ZT-AD-FALLBACK",
-            title = "Official Partner Promotion",
-            sponsorName = "Zentora Partner Network",
-            adMediaUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-            clickThroughUrl = "https://play.google.com/store/apps/details?id=com.zentora.nexora.stream",
-            isSkippable = true,
-            skippableAfterSeconds = 9,
-            totalAdDurationSeconds = 15
-        )
+        val finalAd = fetchedAd
+        if (finalAd == null) {
+            // No sponsor is booked (or the server is unreachable): the video itself starts immediately.
+            playMainVideo()
+            return@LaunchedEffect
+        }
 
         currentAd = finalAd
         isAdActive = true
@@ -532,8 +524,6 @@ fun PlayerScreen(
                 }
 
                 if (!isAdActive) {
-                    // FloatingReactionContainer removed successfully here.
-
                     doubleTapFeedback?.let { fb ->
                         Box(
                             modifier = Modifier
@@ -703,11 +693,6 @@ fun PlayerScreen(
                                 )
                             }
 
-                            ReplayedHeatmapCanvas(
-                                videoDurationMs = totalDurationMs,
-                                seed = currentVideo.id.hashCode()
-                            )
-
                             val safeTotalDurationFloat = maxOf(1f, totalDurationMs.toFloat())
                             val safeCurrentPosFloat = currentPositionMs.toFloat().coerceIn(0f, safeTotalDurationFloat)
 
@@ -834,7 +819,7 @@ fun PlayerScreen(
                             ) {
                                 Box {
                                     AsyncImage(
-                                        model = authorChannel?.avatarUri ?: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150",
+                                        model = authorChannel?.avatarUri.orEmpty(),
                                         contentDescription = "Channel",
                                         modifier = Modifier
                                             .size(40.dp)
@@ -854,7 +839,7 @@ fun PlayerScreen(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(authorChannel?.channelName ?: "Zentora CLC", fontWeight = FontWeight.Bold)
+                                        Text(authorChannel?.channelName.orEmpty(), fontWeight = FontWeight.Bold)
                                         if (authorChannel?.hasZentoraBadge == true) {
                                             Spacer(modifier = Modifier.width(4.dp))
                                             Icon(
@@ -866,7 +851,8 @@ fun PlayerScreen(
                                         }
                                     }
                                     Text(
-                                        text = "${authorChannel?.subscriberCount ?: 0L} subscribers • ${authorChannel?.creatorLevel ?: "Rising Creator"}",
+                                        text = "${authorChannel?.subscriberCount ?: 0L} subscribers" +
+                                            (authorChannel?.creatorLevel?.takeIf { it.isNotBlank() }?.let { " • $it" } ?: ""),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = NexoraRed
                                     )
