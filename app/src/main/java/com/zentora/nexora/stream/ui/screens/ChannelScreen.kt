@@ -96,6 +96,8 @@ fun ChannelScreen(
     val currentChannel = channel ?: fallbackChannel
 
     Scaffold(
+        modifier = Modifier.premiumGlow(),
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = {
@@ -150,7 +152,7 @@ fun ChannelScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         }
     ) { paddingValues ->
@@ -371,7 +373,7 @@ fun ChannelScreen(
                             height = 2.5.dp
                         )
                     },
-                    containerColor = MaterialTheme.colorScheme.background,
+                    containerColor = Color.Transparent,
                     divider = {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                     }
