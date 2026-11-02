@@ -12,7 +12,6 @@ import com.zentora.nexora.stream.engine.FriendPerson
 import com.zentora.nexora.stream.engine.FriendRequestOutcome
 import com.zentora.nexora.stream.engine.FriendsBackend
 import com.zentora.nexora.stream.engine.FriendsOverview
-import com.zentora.nexora.stream.engine.NexoraIdManager
 import com.zentora.nexora.stream.engine.PersonHit
 import com.zentora.nexora.stream.engine.SessionStore
 import kotlinx.coroutines.CancellationException
@@ -61,7 +60,8 @@ class FriendsRepository private constructor(private val context: Context) {
 
     private val db = NexoraDatabase.getInstance(context)
     private val dao = db.nexoraDao()
-    private val backend = FriendsBackend(BACKEND_BASE_URL) { token -> onSessionTokenRenewed(token) }
+    private val calls = SessionCalls.getInstance(context)
+    private val backend = FriendsBackend(calls.http)
     private val refreshMutex = Mutex()
 
     private val _state = MutableStateFlow(FriendsState())
@@ -70,33 +70,8 @@ class FriendsRepository private constructor(private val context: Context) {
     /** Confirmed friends (cached copy of the server list). */
     val friends: Flow<List<PrivateFriendEntity>> = dao.getAllPrivateFriends()
 
-    // ------------------------------------------------------------------ session plumbing
-
-    private fun onSessionTokenRenewed(token: String) {
-        if (token.isBlank() || SessionStore.current() == null) return
-        SessionStore.updateSessionToken(token)
-        context.getSharedPreferences(VAULT1_PREFS, Context.MODE_PRIVATE).edit().putString(KEY_AUTH_TOKEN, token).apply()
-    }
-
-    /** A 401 on a session call: the session is expired or the account is unknown to the server. Sign in again. */
-    private fun handleUnauthorized() {
-        SessionStore.clear()
-        NexoraIdManager.clearSession(context)
-        NexoraStreamRepository.getInstance(context).beginSession()
-    }
-
-    /**
-     * Runs a call that needs the server session, repeating on cold starts and network errors with backoff and jitter.
-     * Returns null when nobody is signed in: nothing is sent in that case.
-     */
-    private suspend fun <T> authed(block: suspend (sessionToken: String) -> BackendResult<T>): BackendResult<T>? {
-        val first = SessionStore.current()?.sessionToken ?: return null
-        val result = backend.withBackoff {
-            block(SessionStore.current()?.sessionToken ?: first)
-        }
-        if (result is BackendResult.Unauthorized) handleUnauthorized()
-        return result
-    }
+    private suspend fun <T> authed(block: suspend (sessionToken: String) -> BackendResult<T>): BackendResult<T>? =
+        calls.authed(block = block)
 
     private fun describe(result: BackendResult<*>?, notFound: String): String = when (result) {
         null -> "Sign in with Google to use Friends."
@@ -151,15 +126,21 @@ class FriendsRepository private constructor(private val context: Context) {
         ok
     }
 
-    /** Rewrites the Room copy from the server list in one transaction, keeping the local chat preview of each friend. */
+    /**
+     * Rewrites the Room copy from the server list in one transaction. The chat preview (last message, unread count) of
+     * each friend is recomputed from the stored messages; a friend who changed their handle keeps their conversation.
+     */
     private suspend fun applyOverview(overview: FriendsOverview) {
         db.withTransaction {
-            val current = dao.getAllPrivateFriends().first().associateBy { it.handle }
+            val current = dao.getAllPrivateFriends().first()
+            val byHandle = current.associateBy { it.handle }
+            val byId = current.filter { it.nexoraId.isNotBlank() }.associateBy { it.nexoraId }
             val serverHandles = HashSet<String>()
             for (friend in overview.friends) {
                 if (friend.handle.isBlank()) continue
                 serverHandles.add(friend.handle)
-                val old = current[friend.handle]
+                val old = byHandle[friend.handle] ?: byId[friend.nexoraId]
+                if (old != null && old.handle != friend.handle) dao.renameConversation(friend.nexoraId, friend.handle)
                 dao.insertPrivateFriend(
                     PrivateFriendEntity(
                         handle = friend.handle,
@@ -170,13 +151,15 @@ class FriendsRepository private constructor(private val context: Context) {
                         lastMessageTimestamp = old?.lastMessageTimestamp ?: friend.sinceMs,
                         unreadCount = old?.unreadCount ?: 0,
                         // The server has no presence information yet, so nobody is shown as online.
-                        isOnline = false
+                        isOnline = false,
+                        nexoraId = friend.nexoraId
                     )
                 )
             }
-            for (old in current.values) {
+            for (old in current) {
                 if (old.handle !in serverHandles) dao.deletePrivateFriend(old.handle)
             }
+            dao.syncAllFriendSummaries()
 
             // The chat screen reads the own handle from this table: keep it equal to the real account.
             val previousProfile = dao.getPrivateProfileSync()
@@ -269,10 +252,6 @@ class FriendsRepository private constructor(private val context: Context) {
     }
 
     companion object {
-        // Same server as NexoraStreamRepository (that constant is private to its companion).
-        private const val BACKEND_BASE_URL = "https://nexora-backend-fq54.onrender.com"
-        private const val VAULT1_PREFS = "nexora_vault1_session"
-        private const val KEY_AUTH_TOKEN = "auth_token"
         private const val MIN_QUERY_LENGTH = 3
         private const val TAG = "FriendsRepository"
 
