@@ -179,4 +179,88 @@ interface NexoraDao {
 
     @Query("DELETE FROM private_chat_messages WHERE messageId = :messageId")
     suspend fun deleteChatMessage(messageId: String)
+
+    // ---- Chat sync (Vault 35, sub-vault friend-chat) ----
+
+    /** The newest [limit] messages of a conversation, oldest first. The screen asks for more when the user scrolls up. */
+    @Query(
+        "SELECT * FROM (SELECT * FROM private_chat_messages WHERE conversationHandle = :handle " +
+            "ORDER BY timestamp DESC, messageId DESC LIMIT :limit) ORDER BY timestamp ASC, messageId ASC"
+    )
+    fun getRecentMessages(handle: String, limit: Int): Flow<List<PrivateChatMessageEntity>>
+
+    @Query("SELECT * FROM private_chat_messages WHERE messageId = :messageId LIMIT 1")
+    suspend fun getChatMessage(messageId: String): PrivateChatMessageEntity?
+
+    /** Stores a message unless it is there already, so a repeated sync never resets what the user has read. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertChatMessageIfAbsent(message: PrivateChatMessageEntity): Long
+
+    /** My own message came back from the server's log: it now has its number and the server's time. */
+    @Query("UPDATE private_chat_messages SET serverSeq = :seq, timestamp = :timestamp, sendState = 0 WHERE messageId = :messageId AND isFromMe = 1")
+    suspend fun confirmSentMessage(messageId: String, seq: Long, timestamp: Long): Int
+
+    @Query("UPDATE private_chat_messages SET sendState = :state WHERE messageId = :messageId")
+    suspend fun setChatSendState(messageId: String, state: Int)
+
+    /** The server accepted the message; the numbering still comes from the sync. Does not touch a confirmed message. */
+    @Query("UPDATE private_chat_messages SET sendState = 0 WHERE messageId = :messageId AND sendState <> 0")
+    suspend fun markChatDelivered(messageId: String)
+
+    /** Messages written here that the server has not accepted yet, oldest first. */
+    @Query("SELECT * FROM private_chat_messages WHERE isFromMe = 1 AND sendState = 1 ORDER BY timestamp ASC LIMIT 200")
+    suspend fun getPendingOutgoing(): List<PrivateChatMessageEntity>
+
+    /** The friend has read my messages up to number [upTo]. */
+    @Query("UPDATE private_chat_messages SET isRead = 1 WHERE peerId = :peerId AND isFromMe = 1 AND isRead = 0 AND serverSeq > 0 AND serverSeq <= :upTo")
+    suspend fun markSentMessagesRead(peerId: String, upTo: Long)
+
+    /** I have read the friend's messages up to number [upTo] (on this or another of my devices). */
+    @Query("UPDATE private_chat_messages SET isRead = 1 WHERE peerId = :peerId AND isFromMe = 0 AND isRead = 0 AND serverSeq <= :upTo")
+    suspend fun markReceivedMessagesRead(peerId: String, upTo: Long)
+
+    /** Newest message number received from [peerId]; 0 when there is none. */
+    @Query("SELECT COALESCE(MAX(serverSeq), 0) FROM private_chat_messages WHERE peerId = :peerId AND isFromMe = 0")
+    suspend fun getNewestReceivedSeq(peerId: String): Long
+
+    /** Where the sync continues: the highest event number this phone has stored. 0 = start from the beginning. */
+    @Query("SELECT COALESCE(MAX(serverSeq), 0) FROM private_chat_messages")
+    suspend fun getChatCursor(): Long
+
+    @Query("SELECT conversationHandle FROM private_chat_messages WHERE peerId = :peerId LIMIT 1")
+    suspend fun getConversationHandleOf(peerId: String): String?
+
+    @Query("SELECT * FROM private_friends WHERE nexoraId = :nexoraId LIMIT 1")
+    suspend fun getPrivateFriendByNexoraId(nexoraId: String): PrivateFriendEntity?
+
+    /** A friend changed their handle: their conversation follows. */
+    @Query("UPDATE private_chat_messages SET conversationHandle = :newHandle WHERE peerId = :peerId AND conversationHandle <> :newHandle")
+    suspend fun renameConversation(peerId: String, newHandle: String)
+
+    /** Unread count and last message of the given friends, recomputed from the stored messages. */
+    @Query(
+        "UPDATE private_friends SET " +
+            "unreadCount = (SELECT COUNT(*) FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle AND m.isFromMe = 0 AND m.isRead = 0), " +
+            "lastMessage = COALESCE((SELECT m.text FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle ORDER BY m.timestamp DESC LIMIT 1), lastMessage), " +
+            "lastMessageTimestamp = COALESCE((SELECT m.timestamp FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle ORDER BY m.timestamp DESC LIMIT 1), lastMessageTimestamp) " +
+            "WHERE handle IN (:handles)"
+    )
+    suspend fun syncFriendSummaries(handles: List<String>)
+
+    /** The same for every friend (used after the friends list was refreshed). */
+    @Query(
+        "UPDATE private_friends SET " +
+            "unreadCount = (SELECT COUNT(*) FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle AND m.isFromMe = 0 AND m.isRead = 0), " +
+            "lastMessage = COALESCE((SELECT m.text FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle ORDER BY m.timestamp DESC LIMIT 1), lastMessage), " +
+            "lastMessageTimestamp = COALESCE((SELECT m.timestamp FROM private_chat_messages m WHERE m.conversationHandle = private_friends.handle ORDER BY m.timestamp DESC LIMIT 1), lastMessageTimestamp)"
+    )
+    suspend fun syncAllFriendSummaries()
+
+    /** Another account signed in on this phone: nothing of the previous account's chats may stay. */
+    @Query("DELETE FROM private_chat_messages")
+    suspend fun deleteAllChatMessages()
+
+    /** The friends list is only a copy of the server's; a different account gets its own from the next refresh. */
+    @Query("DELETE FROM private_friends")
+    suspend fun deleteAllPrivateFriends()
 }
