@@ -11,6 +11,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.zentora.nexora.stream.data.repository.ChatRepository
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
 import com.zentora.nexora.stream.engine.NetworkConnectivityManager
 import com.zentora.nexora.stream.engine.NexoraIdManager
@@ -18,6 +22,7 @@ import com.zentora.nexora.stream.ui.NexoraNavHost
 import com.zentora.nexora.stream.ui.screens.AuthGateScreen
 import com.zentora.nexora.stream.ui.screens.OfflineBlockScreen
 import com.zentora.nexora.stream.ui.theme.NexoraStreamTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -37,6 +42,14 @@ class MainActivity : ComponentActivity() {
         // Initialize Vault 1 session and Room Database repository
         NexoraIdManager.initSession(applicationContext)
         repository = NexoraStreamRepository.getInstance(applicationContext)
+
+        // Private chat (Vault 35): follow the server's chat log while the app is on screen. The loop starts when the
+        // activity is STARTED and is cancelled (its open request closed) as soon as the app goes to the background.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                ChatRepository.getInstance(applicationContext).runSync()
+            }
+        }
 
         // Parse deep link and call intents from starting intent
         parseIntent(intent)
