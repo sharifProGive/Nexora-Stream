@@ -2,14 +2,10 @@
 package com.zentora.nexora.stream.engine
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 
 // ---------------------------------------------------------------------------
@@ -92,74 +88,17 @@ private fun friendsError(error: String, code: Int): String = when (error) {
 // ---------------------------------------------------------------------------
 
 /**
- * Every call takes the Nexora session token explicitly, like [AccountBackend], so the caller decides what happens on
- * [BackendResult.Unauthorized]. Retries use [AccountBackend.withBackoff] (exponential backoff with jitter).
- *
- * @param onSessionTokenRenewed called when the server sends a fresh session token (X-Nexora-Session-Token)
+ * Every call takes the Nexora session token explicitly, so the caller decides what happens on
+ * [BackendResult.Unauthorized]. Retrying (exponential backoff with jitter) is done by SessionCalls.
  */
-class FriendsBackend(
-    baseUrl: String,
-    private val onSessionTokenRenewed: (String) -> Unit
-) {
-
-    private val baseUrl: String = baseUrl.trimEnd('/')
-
-    /** Only used for its retry policy. */
-    private val retryPolicy = AccountBackend(baseUrl, onSessionTokenRenewed)
+class FriendsBackend(private val http: NexoraHttp) {
 
     private companion object {
-        // Render's free tier needs up to a minute to wake up, so the first request is allowed to be slow.
-        const val CONNECT_TIMEOUT_MS = 30_000
-        const val READ_TIMEOUT_MS = 60_000
-        const val USER_AGENT = "NexoraStream/3.0 (Zentora CLC)"
-        const val RENEWED_TOKEN_HEADER = "X-Nexora-Session-Token"
         const val PATH = "/api/v1/account/friends"
     }
 
-    private class RawResponse(val code: Int, val text: String)
-
-    suspend fun <T> withBackoff(
-        maxAttempts: Int = 4,
-        block: suspend () -> BackendResult<T>
-    ): BackendResult<T> = retryPolicy.withBackoff(maxAttempts = maxAttempts, block = block)
-
-    // ------------------------------------------------------------------ transport
-
-    private suspend fun exchange(method: String, path: String, bearer: String, body: JSONObject?): RawResponse =
-        withContext(Dispatchers.IO) {
-            val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
-            try {
-                connection.requestMethod = method
-                connection.connectTimeout = CONNECT_TIMEOUT_MS
-                connection.readTimeout = READ_TIMEOUT_MS
-                connection.useCaches = false
-                connection.setRequestProperty("Accept", "application/json")
-                connection.setRequestProperty("User-Agent", USER_AGENT)
-                connection.setRequestProperty("Authorization", "Bearer $bearer")
-                if (body != null) {
-                    val bytes = body.toString().toByteArray(Charsets.UTF_8)
-                    connection.doOutput = true
-                    connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    connection.setFixedLengthStreamingMode(bytes.size)
-                    connection.outputStream.use { it.write(bytes) }
-                }
-                val code = connection.responseCode
-                val renewed = connection.getHeaderField(RENEWED_TOKEN_HEADER)
-                if (!renewed.isNullOrBlank()) onSessionTokenRenewed(renewed)
-                val stream = if (code in 200..399) connection.inputStream else connection.errorStream
-                val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-                RawResponse(code, text)
-            } finally {
-                connection.disconnect()
-            }
-        }
-
     private fun classify(code: Int, text: String): BackendResult<JSONObject> {
-        val json: JSONObject? = try {
-            if (text.isBlank()) null else JSONObject(text)
-        } catch (e: JSONException) {
-            null
-        }
+        val json = http.parseObject(text)
         val error = json?.optString("error", "").orEmpty()
         return when {
             // A 2xx that is not JSON is the proxy / "service waking up" page, not our API.
@@ -175,7 +114,7 @@ class FriendsBackend(
 
     private suspend fun call(method: String, path: String, bearer: String, body: JSONObject? = null): BackendResult<JSONObject> =
         try {
-            val raw = exchange(method, path, bearer, body)
+            val raw = http.exchange(method, path, bearer, body)
             classify(raw.code, raw.text)
         } catch (e: CancellationException) {
             throw e
