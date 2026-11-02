@@ -1,51 +1,62 @@
 /* © 2026 Zentora CLC. All rights reserved. Platform Core engineered by Zentora. */
 package com.zentora.nexora.stream.ui.screens
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.zentora.nexora.stream.data.database.entities.CHAT_SEND_STATE_FAILED
+import com.zentora.nexora.stream.data.database.entities.CHAT_SEND_STATE_PENDING
 import com.zentora.nexora.stream.data.database.entities.PrivateChatMessageEntity
 import com.zentora.nexora.stream.data.database.entities.PrivateFriendEntity
+import com.zentora.nexora.stream.data.repository.ChatActionResult
+import com.zentora.nexora.stream.data.repository.ChatRepository
 import com.zentora.nexora.stream.data.repository.NexoraStreamRepository
-import com.zentora.nexora.stream.ui.theme.premiumGlow
 import kotlinx.coroutines.launch
+import java.text.DateFormat
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+private const val FIRST_PAGE = 60
+private const val NEXT_PAGE = 60
+private const val DAY_MS = 86_400_000L
 
 /**
- * Premium Private Chat Detail Screen (Pillar 4).
- * Voice & Video call buttons at the top, attachment (+) button on the left,
- * send button on the right, and encrypted local message store.
+ * Private chat with one friend (Vault 35, sub-vault friend-chat). Messages come from and go to the Nexora server through
+ * [ChatRepository]; Room holds the copy this screen shows, so it opens instantly and works offline.
+ *
+ * Every message of mine shows its real state: sending (clock), delivered (one tick), read by the friend (two blue
+ * ticks) or not sent (red, with Retry and Delete). Files are added to this screen with the file-sending step.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,43 +67,84 @@ fun ChatDetailScreen(
     onStartCall: (name: String, handle: String, isVideo: Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    val chat = remember { ChatRepository.getInstance(context.applicationContext) }
     val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
     BackHandler { onBack() }
 
-    val myProfile by repository.privateProfile.collectAsState(initial = null)
-    var friend by remember { mutableStateOf<PrivateFriendEntity?>(null) }
-    val messages by repository.getMessagesForConversation(friendHandle).collectAsState(initial = emptyList())
-
-    val listState = rememberLazyListState()
-    var textInput by remember { mutableStateOf("") }
-    var attachedMediaUri by remember { mutableStateOf<String?>(null) }
-
-    // Media Picker for Attachments (+)
-    val mediaPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
-            attachedMediaUri = uri.toString()
-            Toast.makeText(context, "Attachment ready", Toast.LENGTH_SHORT).show()
-        }
-    }
+    var friend by remember(friendHandle) { mutableStateOf<PrivateFriendEntity?>(null) }
+    var limit by remember(friendHandle) { mutableIntStateOf(FIRST_PAGE) }
+    var shown by remember(friendHandle) { mutableStateOf<List<PrivateChatMessageEntity>>(emptyList()) }
+    var input by remember(friendHandle) { mutableStateOf("") }
 
     LaunchedEffect(friendHandle) {
         friend = repository.getPrivateFriend(friendHandle)
-        repository.markConversationAsRead(friendHandle)
     }
 
-    // Scroll to latest message
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+    // The list keeps showing the old messages while a longer page is being loaded (no flash to empty).
+    val messagesFlow = remember(friendHandle, limit) { chat.messages(friendHandle, limit) }
+    LaunchedEffect(messagesFlow) {
+        messagesFlow.collect { shown = it }
+    }
+
+    // While this screen is open, the friend's new messages are read at once and the friend gets the double tick.
+    DisposableEffect(friendHandle) {
+        chat.openConversation(friendHandle)
+        onDispose { chat.closeConversation(friendHandle) }
+    }
+    val newestIncomingSeq = remember(shown) { shown.lastOrNull { !it.isFromMe }?.serverSeq ?: 0L }
+    LaunchedEffect(friendHandle, newestIncomingSeq) {
+        chat.markConversationRead(friendHandle)
+    }
+
+    val listState = rememberLazyListState()
+
+    // Follow new messages only while the user is at the bottom; a user who scrolled up to read is not pulled down.
+    var followBottom by remember(friendHandle) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) followBottom = !listState.canScrollForward
+        }
+    }
+    val newestId = shown.lastOrNull()?.messageId
+    val newestIsMine = shown.lastOrNull()?.isFromMe == true
+    LaunchedEffect(newestId) {
+        if (newestId != null && (followBottom || newestIsMine)) {
+            listState.scrollToItem(shown.lastIndex)
+        }
+    }
+
+    // Older messages: when the user reaches the top and the page is full, load the next page.
+    val atTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
+    LaunchedEffect(atTop, shown.size) {
+        if (atTop && shown.isNotEmpty() && shown.size >= limit) limit += NEXT_PAGE
+    }
+
+    fun report(result: ChatActionResult) {
+        when (result) {
+            ChatActionResult.Done -> Unit
+            is ChatActionResult.Queued -> scope.launch { snackbar.showSnackbar(result.message) }
+            is ChatActionResult.Failed -> scope.launch { snackbar.showSnackbar(result.message) }
+            is ChatActionResult.Rejected -> scope.launch { snackbar.showSnackbar(result.message) }
+        }
+    }
+
+    fun submit() {
+        val text = input.trim()
+        if (text.isEmpty()) return
+        input = ""
+        followBottom = true
+        scope.launch {
+            val result = chat.send(friendHandle, text)
+            // Nothing was stored: give the text back instead of losing it.
+            if (result is ChatActionResult.Rejected && input.isEmpty()) input = text
+            report(result)
         }
     }
 
     val friendName = friend?.displayName ?: friendHandle.removePrefix("@")
 
     Scaffold(
-        modifier = Modifier.premiumGlow(),
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -109,7 +161,6 @@ fun ChatDetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(start = 2.dp)
                     ) {
-                        // Avatar
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
@@ -151,7 +202,6 @@ fun ChatDetailScreen(
                     }
                 },
                 actions = {
-                    // Voice Call Button
                     IconButton(
                         onClick = { onStartCall(friendName, friendHandle, false) },
                         modifier = Modifier.testTag("chat_voice_call_button")
@@ -162,8 +212,6 @@ fun ChatDetailScreen(
                             tint = Color.White
                         )
                     }
-
-                    // Video Call Button
                     IconButton(
                         onClick = { onStartCall(friendName, friendHandle, true) },
                         modifier = Modifier.testTag("chat_video_call_button")
@@ -175,140 +223,97 @@ fun ChatDetailScreen(
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E1E1E))
             )
         },
-        containerColor = Color.Transparent
+        snackbarHost = { SnackbarHost(snackbar) },
+        containerColor = Color(0xFF0F0F0F)
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .imePadding()
         ) {
-            // Messages Conversation History
-            LazyColumn(
-                state = listState,
+            Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 12.dp)
             ) {
-                items(messages, key = { it.messageId }) { msg ->
-                    ChatMessageBubble(
-                        message = msg,
-                        isFromMe = msg.isFromMe
-                    )
-                }
-            }
-
-            // Attached Media Preview if selected
-            if (!attachedMediaUri.isNullOrBlank()) {
-                Row(
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xE60F131C))
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF282828))
-                    ) {
-                        AsyncImage(
-                            model = attachedMediaUri,
-                            contentDescription = "Attachment Preview",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
+                    itemsIndexed(shown, key = { _, message -> message.messageId }) { index, message ->
+                        val previous = shown.getOrNull(index - 1)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (previous == null || dayNumber(previous.timestamp) != dayNumber(message.timestamp)) {
+                                DayLabel(message.timestamp)
+                            }
+                            ChatMessageBubble(
+                                message = message,
+                                onRetry = { scope.launch { report(chat.retry(message.messageId)) } },
+                                onDiscard = { scope.launch { chat.discardUnsent(message.messageId) } }
+                            )
+                        }
                     }
-                    Spacer(modifier = Modifier.width(10.dp))
+                }
+
+                if (shown.isEmpty()) {
                     Text(
-                        text = "Media attached",
-                        color = Color.LightGray,
-                        fontSize = 12.sp,
-                        modifier = Modifier.weight(1f)
+                        text = "No messages yet.\nSay hello to $friendName.",
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(horizontal = 32.dp)
                     )
-                    TextButton(onClick = { attachedMediaUri = null }) {
-                        Text("Remove", color = Color(0xFFFF453A), fontSize = 12.sp)
-                    }
                 }
             }
 
-            // Bottom Input Bar: (+) Attachment on Left, Rounded Field, Send on Right
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xE60F131C))
+                    .background(Color(0xFF1E1E1E))
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left Attachment (+) Button
-                IconButton(
-                    onClick = { mediaPickerLauncher.launch("image/*") },
-                    modifier = Modifier
-                        .size(38.dp)
-                        .testTag("chat_attachment_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Attach Media",
-                        tint = Color.LightGray,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // Middle Text Field
                 OutlinedTextField(
-                    value = textInput,
-                    onValueChange = { textInput = it },
+                    value = input,
+                    onValueChange = { input = it.take(ChatRepository.MAX_MESSAGE_CHARS) },
                     placeholder = { Text("Message", fontSize = 14.sp, color = Color.Gray) },
                     modifier = Modifier
                         .weight(1f)
                         .testTag("chat_message_input"),
                     shape = RoundedCornerShape(22.dp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
                         focusedBorderColor = Color.Transparent,
                         unfocusedBorderColor = Color.Transparent,
-                        focusedContainerColor = Color(0xFF1C2230),
-                        unfocusedContainerColor = Color(0xFF1C2230)
+                        focusedContainerColor = Color(0xFF2B2B2B),
+                        unfocusedContainerColor = Color(0xFF2B2B2B)
                     ),
                     maxLines = 4
                 )
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Right Send Button
-                val canSend = textInput.isNotBlank() || attachedMediaUri != null
+                val canSend = input.isNotBlank()
                 FilledIconButton(
-                    onClick = {
-                        if (canSend) {
-                            val sender = myProfile?.handle ?: "@me"
-                            val toSendText = textInput.trim()
-                            val toSendMedia = attachedMediaUri
-
-                            scope.launch {
-                                repository.sendChatMessage(
-                                    conversationHandle = friendHandle,
-                                    senderHandle = sender,
-                                    text = toSendText.ifBlank { "Sent an attachment" },
-                                    mediaUri = toSendMedia
-                                )
-                                textInput = ""
-                                attachedMediaUri = null
-                            }
-                        }
-                    },
+                    onClick = { submit() },
+                    enabled = canSend,
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (canSend) Color(0xFF00B0FF) else Color(0xFF333333),
-                        contentColor = Color.White
+                        containerColor = Color(0xFF2BA640),
+                        contentColor = Color.White,
+                        disabledContainerColor = Color(0xFF333333),
+                        disabledContentColor = Color.Gray
                     ),
                     modifier = Modifier
                         .size(42.dp)
@@ -325,61 +330,59 @@ fun ChatDetailScreen(
     }
 }
 
+/** Days since 1970 in the phone's time zone, so two messages of the same calendar day get the same number. */
+private fun dayNumber(timestamp: Long): Long = (timestamp + TimeZone.getDefault().getOffset(timestamp)) / DAY_MS
+
+@Composable
+private fun DayLabel(timestamp: Long) {
+    val label = remember(timestamp) {
+        val today = dayNumber(System.currentTimeMillis())
+        when (today - dayNumber(timestamp)) {
+            0L -> "Today"
+            1L -> "Yesterday"
+            else -> DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(timestamp))
+        }
+    }
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF202C33)) {
+            Text(
+                text = label,
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+            )
+        }
+    }
+}
+
 @Composable
 fun ChatMessageBubble(
     message: PrivateChatMessageEntity,
-    isFromMe: Boolean
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit
 ) {
+    val isFromMe = message.isFromMe
     val timeFormatted = remember(message.timestamp) {
-        val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
-        sdf.format(Date(message.timestamp))
+        SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(message.timestamp))
     }
-
-    val bubbleShape = RoundedCornerShape(
-        topStart = 16.dp,
-        topEnd = 16.dp,
-        bottomStart = if (isFromMe) 16.dp else 3.dp,
-        bottomEnd = if (isFromMe) 3.dp else 16.dp
-    )
-    val bubbleStyle = if (isFromMe) {
-        Modifier.background(
-            brush = Brush.linearGradient(listOf(Color(0xFF0072FF), Color(0xFF00B0FF))),
-            shape = bubbleShape
-        )
-    } else {
-        Modifier
-            .background(Color(0xFF1C2230), bubbleShape)
-            .border(1.dp, Color(0x3300E5FF), bubbleShape)
-    }
+    val failed = isFromMe && message.sendState == CHAT_SEND_STATE_FAILED
+    val pending = isFromMe && message.sendState == CHAT_SEND_STATE_PENDING
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isFromMe) Arrangement.End else Arrangement.Start
     ) {
-        Box(
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .then(bubbleStyle)
+        Surface(
+            shape = RoundedCornerShape(
+                topStart = 14.dp,
+                topEnd = 14.dp,
+                bottomStart = if (isFromMe) 14.dp else 2.dp,
+                bottomEnd = if (isFromMe) 2.dp else 14.dp
+            ),
+            color = if (isFromMe) Color(0xFF005C4B) else Color(0xFF202C33),
+            modifier = Modifier.widthIn(max = 280.dp)
         ) {
             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                if (!message.mediaUri.isNullOrBlank()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.3f))
-                    ) {
-                        AsyncImage(
-                            model = message.mediaUri,
-                            contentDescription = "Attached Media",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                }
-
                 Text(
                     text = message.text,
                     color = Color.White,
@@ -400,12 +403,47 @@ fun ChatMessageBubble(
                     )
                     if (isFromMe) {
                         Spacer(modifier = Modifier.width(3.dp))
-                        Icon(
-                            imageVector = Icons.Default.Done,
-                            contentDescription = "Saved",
-                            tint = Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.size(14.dp)
-                        )
+                        when {
+                            failed -> Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = "Not sent",
+                                tint = Color(0xFFFF453A),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            pending -> Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Sending",
+                                tint = Color.White.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            message.isRead -> Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = "Read",
+                                tint = Color(0xFF53BDEB),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            else -> Icon(
+                                imageVector = Icons.Default.Done,
+                                contentDescription = "Delivered",
+                                tint = Color.White.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (failed) {
+                    Row(
+                        modifier = Modifier.align(Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "Not sent", color = Color(0xFFFF453A), fontSize = 11.sp)
+                        TextButton(onClick = onRetry, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                            Text("Retry", color = Color(0xFF53BDEB), fontSize = 12.sp)
+                        }
+                        TextButton(onClick = onDiscard, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                            Text("Delete", color = Color.LightGray, fontSize = 12.sp)
+                        }
                     }
                 }
             }
