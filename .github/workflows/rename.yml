@@ -1,0 +1,115 @@
+name: Rename to Nexmora
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    name: Rename project and verify build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rename Nexora to Nexmora
+        run: |
+          #!/usr/bin/env bash
+          # Renames the Android project from Nexora to Nexmora (package, folders, file names, class names, resources, prefs).
+          # Wire-protocol names shared with the live backend are kept on purpose: X-Nexora-* headers, nexoraId / nexora_id fields.
+          set -euo pipefail
+
+          ZW=$'\xe2\x80\x8b'   # zero-width space that sits in one file name (AccountBackend.kt)
+
+          # 1. Move the source folders: com/zentora/nexora/stream -> com/zentora/nexmora
+          for set in main test androidTest; do
+            old="app/src/$set/java/com/zentora/nexora/stream"
+            new="app/src/$set/java/com/zentora/nexmora"
+            if [ -d "$old" ]; then
+              mkdir -p "$(dirname "$new")"
+              git mv "$old" "$new"
+              rmdir "app/src/$set/java/com/zentora/nexora" 2>/dev/null || true
+            fi
+          done
+
+          # 2. Rename files: Nexora* -> Nexmora*, and drop the hidden character from file names
+          find app -type f | while IFS= read -r f; do
+            dir="$(dirname "$f")"; base="$(basename "$f")"
+            nb="${base//$ZW/}"
+            nb="${nb//Nexora/Nexmora}"
+            nb="${nb//nexora/nexmora}"
+            if [ "$nb" != "$base" ]; then git mv "$f" "$dir/$nb"; fi
+          done
+
+          # 3. Rewrite text inside files. Kept as they are (shared with the backend): X-Nexora-, nexoraId, NexoraId, nexora_id.
+          files=$(git ls-files 'app/*' 'gradle/*' '*.kts' '*.gradle' '*.properties' '*.toml' '*.pro' '*.json' '*.md' \
+            | grep -vE '\.(png|jpg|jpeg|webp|jar|keystore|jks|ttf|otf|mp3|mp4)$' | sort -u)
+          for f in $files; do
+            [ -f "$f" ] || continue
+            grep -qI . "$f" || continue
+            perl -CSD -i -pe '
+              s/\x{200B}//g;
+              s/com\.zentora\.nexora\.stream/com.zentora.nexmora/g;
+              s/com\/zentora\/nexora\/stream/com\/zentora\/nexmora/g;
+              s/X-Nexora-/X-\x01HDR\x01-/g;
+              s/nexora-backend/\x01BACKEND\x01/g;
+              s/NEXORA_ID_SECRET/\x01SECRET\x01/g;
+              s/\b(\w*[nN])exoraId\b/$1\x01ID\x01/g;
+              s/\bnexora_id\b/\x01SNAKE\x01/g;
+              s/Nexora Stream/Nexmora/g;
+              s/Nexora-Stream/Nexmora/g;
+              s/NexoraStream/NexmoraStream/g;
+              s/Nexora/Nexmora/g;
+              s/nexora/nexmora/g;
+              s/NEXORA/NEXMORA/g;
+              s/X-\x01HDR\x01-/X-Nexora-/g;
+              s/\x01BACKEND\x01/nexora-backend/g;
+              s/\x01SECRET\x01/NEXORA_ID_SECRET/g;
+              s/\x01ID\x01/exoraId/g;
+              s/\x01SNAKE\x01/nexora_id/g;
+            ' "$f"
+          done
+
+          echo "rename finished"
+
+      - name: Check nothing of the old package is left
+        run: |
+          if git grep -nI "com\.zentora\.nexora" -- . ":!.github"; then
+            echo "Old package name is still present."
+            exit 1
+          fi
+          if [ -d app/src/main/java/com/zentora/nexora ]; then
+            echo "Old source folder still exists."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x gradlew || true
+
+      - name: Restore fixed debug signing key
+        run: base64 -d app/debug.keystore.b64 > app/debug.keystore
+
+      - name: Build Debug APK with Gradle
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Commit result to branch nexmora-rename
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B nexmora-rename
+          git rm -q --cached app/debug.keystore 2>/dev/null || true
+          git add -A -- . ":!app/debug.keystore" ":!app/build" ":!build" ":!.gradle"
+          git commit -m "Rename project from Nexora to Nexmora"
+          git push --force origin nexmora-rename
